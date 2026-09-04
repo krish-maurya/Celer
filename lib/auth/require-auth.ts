@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 const SESSION_COOKIE = "session_token";
 
@@ -9,7 +10,7 @@ export async function requireAuth() {
     const token = cookieStore.get(SESSION_COOKIE)?.value;
 
     if (!token) {
-        return null;
+        redirect("/login");
     }
 
     const session = await prisma.session.findUnique({
@@ -22,7 +23,7 @@ export async function requireAuth() {
     });
 
     if (!session) {
-        return null;
+        redirect("/login");
     }
 
     if (session.expiresAt < new Date()) {
@@ -32,7 +33,9 @@ export async function requireAuth() {
             },
         });
 
-        return null;
+        cookieStore.delete(SESSION_COOKIE)
+
+        redirect("/login");
     }
 
     return session.user;
