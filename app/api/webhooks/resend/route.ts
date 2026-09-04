@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
 
     const email = result.data;
     const sender = parseSender(email.from);
-    const recipient = email.to[0];
+    const recipient = event.data.received_for?.[0];
 
     if (!recipient) {
       return NextResponse.json(
