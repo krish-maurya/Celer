@@ -1,21 +1,21 @@
+import { requireAuth } from "@/lib/auth/require-auth";
 import { prisma } from "@/lib/prisma";
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
-export async function GET(req: NextRequest) {
+export async function GET() {
     try {
+        const user = await requireAuth();
 
-        const userId = req.nextUrl.searchParams.get("USERID")
-
-        if (!userId) {
+        if (!user) {
             return NextResponse.json(
-                { message: "user not found" },
-                { status: 400 }
+                { message: "Not authenticated" },
+                { status: 401 }
             )
         }
 
         const emails = await prisma.email.findMany({
             where: {
-                userId: userId,
+                userId: user.id,
                 folder: {
                     not: 'TRASH'
                 }

@@ -1,3 +1,4 @@
+import { requireAuth } from "@/lib/auth/require-auth";
 import { prisma } from "@/lib/prisma";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -9,13 +10,13 @@ type RouteContext = {
 export async function PATCH(req: NextRequest, { params }: RouteContext) {
     try {
 
-        const userId = req.nextUrl.searchParams.get("USERID");
+        const user = await requireAuth();
         const { emailId } = await params;
 
-        if (!userId) {
+        if (!user) {
             return NextResponse.json(
-                { message: "user not found" },
-                { status: 400 }
+            { message: "Not authenticated" },
+            { status: 401 }
             )
         }
         if (!emailId) {
@@ -28,7 +29,7 @@ export async function PATCH(req: NextRequest, { params }: RouteContext) {
         const result = await prisma.email.updateMany({
             where: {
                 id: emailId,
-                userId
+                userId: user.id
             },
             data: {
                 isStarred:true

@@ -1,3 +1,4 @@
+import { requireAuth } from "@/lib/auth/require-auth";
 import { sendEmailSchema } from "@/lib/validations/email";
 import { NextRequest, NextResponse } from "next/server";
 import { Resend } from "resend";
@@ -9,13 +10,17 @@ if (!process.env.RESEND_API_KEY){
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const user = {
-  email: "hello@krishmaurya.dev",
-  name: "Krish",
-};
-
 export async function POST(req: NextRequest) {
   try {
+    const user = await requireAuth();
+
+    if (!user) {
+      return NextResponse.json(
+        { error: "Not authenticated" },
+        { status: 401 }
+      );
+    }
+
     const body = await req.json();
 
     const result = sendEmailSchema.safeParse(body);

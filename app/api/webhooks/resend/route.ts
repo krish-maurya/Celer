@@ -90,11 +90,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const user = await prisma.user.upsert({
-      where: { email: recipient },
-      update: {},
-      create: { email: recipient, name: recipient.split("@")[0] },
+    const user = await prisma.user.findUnique({
+      where: { email: recipient.trim().toLowerCase() },
     });
+
+    if (!user) {
+      return NextResponse.json(
+        { error: "No registered user found for this recipient" },
+        { status: 404 },
+      );
+    }
 
     const savedEmail = await prisma.email.create({
       data: {
