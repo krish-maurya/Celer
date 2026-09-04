@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
       from: `${user.name} <${user.email}>`,
       to: Array.isArray(to) ? to : [to],
       subject,
-      html: `<p>${text}</p>`,
+      html: text,
     });
 
     if (error) {

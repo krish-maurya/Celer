@@ -1,0 +1,66 @@
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+      url      = env("DATABASE_URL")
+}
+
+enum EmailFolder {
+    INBOX
+    SENT
+    DRAFT
+    TRASH
+    SPAM
+    ARCHIVED
+}
+
+model User {
+    id        String   @id @default(uuid())
+    email     String   @unique
+    name      String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    emails Email[]
+}
+
+model Email {
+    id String @id @default(uuid())
+
+    // Resend information
+    resendEmailId String  @unique
+    messageId     String? @unique
+
+    // Email addresses
+    fromEmail String
+    fromName  String?
+    to        String[]
+    cc        String[]
+    bcc       String[]
+
+    // Email content
+    subject String
+    text    String?
+    html    String?
+
+    // Mail state
+    folder    EmailFolder @default(INBOX)
+    isRead    Boolean     @default(false)
+    isStarred Boolean     @default(false)
+
+    // Timestamps
+    receivedAt DateTime
+    createdAt  DateTime @default(now())
+    updatedAt  DateTime @updatedAt
+
+    //owner
+    userId String
+    user   User   @relation(fields: [userId], references: [id])
+
+    @@index([userId])
+    @@index([receivedAt])
+    @@index([fromName])
+    @@index([fromEmail])
+}

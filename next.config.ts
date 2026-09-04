@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  allowedDevOrigins: [
+    "mushiest-eliseo-unminimised.ngrok-free.dev",
+  ],
 };
 
 export default nextConfig;
