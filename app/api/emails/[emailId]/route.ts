@@ -1,114 +1,70 @@
 import { requireAuth } from "@/lib/auth/require-auth";
 import { prisma } from "@/lib/prisma";
+import { serializeEmail } from "@/lib/serialize";
 import { NextRequest, NextResponse } from "next/server";
 
-type RouteContext = {
-    params: Promise<{ emailId: string }>
+const VALID_FOLDERS = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "ARCHIVED"];
+
+export async function GET(req: NextRequest, { params }: { params: Promise<{ emailId: string }> }) {
+  try {
+    const user = await requireAuth();
+    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+
+    const { emailId } = await params;
+    const email = await prisma.email.findFirst({ where: { id: emailId, userId: user.id } });
+    if (!email) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    return NextResponse.json({ success: true, email: serializeEmail(email) });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ error: "Failed" }, { status: 500 });
+  }
 }
 
-export async function GET(req: NextRequest, { params }: RouteContext) {
-    try {
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ emailId: string }> }) {
+  try {
+    const user = await requireAuth();
+    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
 
-        const user = await requireAuth();
-        const { emailId } = await params;
+    const { emailId } = await params;
+    const body = await req.json();
 
-        if (!user) {
-            return NextResponse.json(
-                { message: "Not authenticated" },
-                { status: 401 }
-            )
-        }
-        if (!emailId){
-            return NextResponse.json(
-                { message: "email not found" },
-                { status: 400 }
-            )
-        }
+    const existing = await prisma.email.findFirst({ where: { id: emailId, userId: user.id } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-        const email = await prisma.email.findFirst({
-            where: {
-                id: emailId,
-                userId: user.id
-            }
-        })
+    const data: any = {};
+    if (typeof body.isRead === "boolean") data.isRead = body.isRead;
+    if (typeof body.isStarred === "boolean") data.isStarred = body.isStarred;
+    if (typeof body.folder === "string" && VALID_FOLDERS.includes(body.folder)) data.folder = body.folder;
 
-        if (!email) {
-            return NextResponse.json(
-                { message: "email not found" },
-                { status: 404 }
-            )
-        }
+    const updated = await prisma.email.update({ where: { id: emailId }, data });
 
-        return NextResponse.json(
-            {
-                success: true,
-                email
-            })
+    return NextResponse.json({ success: true, email: serializeEmail(updated) });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ error: "Failed to update" }, { status: 500 });
+  }
+}
 
-    } catch (error) {
-        console.error("Failed to fetch email:", error);
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ emailId: string }> }) {
+  try {
+    const user = await requireAuth();
+    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
 
-        return NextResponse.json(
-            {
-                success: false,
-                error: "Failed to fetch email",
-            },
-            { status: 500 }
-        );
+    const { emailId } = await params;
+    const existing = await prisma.email.findFirst({ where: { id: emailId, userId: user.id } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    // First delete = move to trash, second delete from trash = permanent
+    if (existing.folder === "TRASH") {
+      await prisma.email.delete({ where: { id: emailId } });
+      return NextResponse.json({ success: true, deleted: true });
+    } else {
+      const updated = await prisma.email.update({ where: { id: emailId }, data: { folder: "TRASH" } });
+      return NextResponse.json({ success: true, trashed: true, email: serializeEmail(updated) });
     }
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ error: "Failed to delete" }, { status: 500 });
+  }
 }
-
-
-
-export async function DELETE(req: NextRequest, { params }: RouteContext) {
-    try {
-
-        const user = await requireAuth();
-        const { emailId } = await params;
-
-        if (!user) {
-            return NextResponse.json(
-                { message: "Not authenticated" },
-                { status: 401 }
-            )
-        }
-        if (!emailId){
-            return NextResponse.json(
-                { message: "email not found" },
-                { status: 400 }
-            )
-        }
-
-        const result = await prisma.email.deleteMany({
-            where: {
-                id: emailId,
-                userId: user.id
-            }
-        })
-
-        if (result.count === 0) {
-            return NextResponse.json(
-                { message: "email not found" },
-                { status: 404 }
-            )
-        }
-
-        return NextResponse.json(
-            {
-                success: true,
-                deleted: true
-            })
-
-    } catch (error) {
-        console.error("Failed to delete email:", error);
-
-        return NextResponse.json(
-            {
-                success: false,
-                error: "Failed to delete email",
-            },
-            { status: 500 }
-        );
-    }
-}
-

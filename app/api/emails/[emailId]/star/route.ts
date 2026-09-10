@@ -1,63 +1,29 @@
 import { requireAuth } from "@/lib/auth/require-auth";
 import { prisma } from "@/lib/prisma";
+import { serializeEmail } from "@/lib/serialize";
 import { NextRequest, NextResponse } from "next/server";
 
-type RouteContext = {
-    params: Promise<{ emailId: string }>
+export async function POST(req: NextRequest, { params }: { params: Promise<{ emailId: string }> }) {
+  try {
+    const user = await requireAuth();
+    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+
+    const { emailId } = await params;
+    const body = await req.json().catch(() => ({}));
+
+    const existing = await prisma.email.findFirst({ where: { id: emailId, userId: user.id } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    const isStarred = typeof body.isStarred === "boolean" ? body.isStarred : !existing.isStarred;
+    const updated = await prisma.email.update({ where: { id: emailId }, data: { isStarred } });
+
+    return NextResponse.json({ success: true, email: serializeEmail(updated) });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ error: "Failed" }, { status: 500 });
+  }
 }
 
-
-export async function PATCH(req: NextRequest, { params }: RouteContext) {
-    try {
-
-        const user = await requireAuth();
-        const { emailId } = await params;
-
-        if (!user) {
-            return NextResponse.json(
-            { message: "Not authenticated" },
-            { status: 401 }
-            )
-        }
-        if (!emailId) {
-            return NextResponse.json(
-                { message: "email not found" },
-                { status: 400 }
-            )
-        }
-
-        const result = await prisma.email.updateMany({
-            where: {
-                id: emailId,
-                userId: user.id
-            },
-            data: {
-                isStarred:true
-            }
-        })
-
-        if (result.count === 0) {
-            return NextResponse.json(
-                { message: "email not found" },
-                { status: 404 }
-            )
-        }
-
-        return NextResponse.json(
-            {
-                success: true,
-                updated: true
-            })
-
-    } catch (error) {
-        console.error("Failed to update email:", error);
-
-        return NextResponse.json(
-            {
-                success: false,
-                error: "Failed to update email",
-            },
-            { status: 500 }
-        );
-    }
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ emailId: string }> }) {
+  return POST(req, { params } as any);
 }

@@ -1,80 +1,86 @@
 generator client {
-    provider = "prisma-client-js"
+  provider = "prisma-client-js"
 }
 
 datasource db {
-    provider = "postgresql"
-      url      = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 enum EmailFolder {
-    INBOX
-    SENT
-    DRAFT
-    TRASH
-    SPAM
-    ARCHIVED
+  INBOX
+  SENT
+  DRAFT
+  TRASH
+  SPAM
+  ARCHIVED
 }
 
 model User {
-    id        String   @id @default(uuid())
-    email     String   @unique
-    name      String
-    passwordHash String
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+  id           String    @id @default(uuid())
+  email        String    @unique
+  name         String
+  passwordHash String
 
-    emails Email[]
-    session Session[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  emails   Email[]
+  sessions Session[]
 }
 
 model Session {
-    id        String   @id @default(uuid())
-    userId String
-    token String @unique
-    expiresAt DateTime
-    createdAt DateTime @default(now())
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 
-    user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+  user User @relation(    fields: [userId],    references: [id],    onDelete: Cascade  )
 
-    @@index([userId])
+  @@index([userId])
 }
 
 model Email {
-    id String @id @default(uuid())
+  id String @id @default(uuid())
 
-    // Resend information
-    resendEmailId String  @unique
-    messageId     String? @unique
+  // Resend identifiers
+  resendEmailId String? @unique
+  messageId     String? @unique
 
-    // Email addresses
-    fromEmail String
-    fromName  String?
-    to        String[]
-    cc        String[]
-    bcc       String[]
+  // Sender
+  fromEmail String
+  fromName  String?
 
-    // Email content
-    subject String
-    text    String?
-    html    String?
+  // Recipients
+  to  Json @default("[]")
+  cc  Json @default("[]")
+  bcc Json @default("[]")
 
-    // Mail state
-    folder    EmailFolder @default(INBOX)
-    isRead    Boolean     @default(false)
-    isStarred Boolean     @default(false)
+  // Attachments
+  attachments Json @default("[]")
 
-    // Timestamps
-    receivedAt DateTime
-    createdAt  DateTime @default(now())
-    updatedAt  DateTime @updatedAt
+  // Email content
+  subject String
+  text    String?
+  html    String?
 
-    //owner
-    userId String
-    user   User   @relation(fields: [userId], references: [id])
+  // Email state
+  folder    EmailFolder @default(INBOX)
+  isRead    Boolean     @default(false)
+  isStarred Boolean     @default(false)
 
-    @@index([userId])
-    @@index([receivedAt])
-    @@index([fromName])
-    @@index([fromEmail])
+  // Timestamps
+  receivedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Owner
+  userId String
+  user   User @relation(fields: [userId],    references: [id],onDelete: Cascade  )
+
+  @@index([userId])
+  @@index([folder])
+  @@index([receivedAt])
+  @@index([fromEmail])
 }

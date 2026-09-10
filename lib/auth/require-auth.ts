@@ -1,42 +1,29 @@
-import { prisma } from "@/lib/prisma";
 import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
+import { SESSION_COOKIE, getUserFromToken } from "./session";
 
-const SESSION_COOKIE = "session_token";
-
+/**
+ * Fixed version:
+ * - Does NOT use redirect() in API routes (redirect throws NEXT_REDIRECT and causes 500)
+ * - Returns user or null, letting API routes return 401 JSON
+ * - For pages, caller can redirect if null
+ */
 export async function requireAuth() {
-    const cookieStore = await cookies();
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  if (!token) return null;
+  const user = await getUserFromToken(token);
+  return user;
+}
 
-    const token = cookieStore.get(SESSION_COOKIE)?.value;
-
-    if (!token) {
-        redirect("/login");
-    }
-
-    const session = await prisma.session.findUnique({
-        where: {
-            token,
-        },
-        include: {
-            user: true,
-        },
-    });
-
-    if (!session) {
-        redirect("/login");
-    }
-
-    if (session.expiresAt < new Date()) {
-        await prisma.session.delete({
-            where: {
-                id: session.id,
-            },
-        });
-
-        cookieStore.delete(SESSION_COOKIE)
-
-        redirect("/login");
-    }
-
-    return session.user;
+/**
+ * Helper for API routes to get token from NextRequest cookies
+ */
+export async function requireAuthFromRequest(req: Request) {
+  // Parse cookie header manually for NextRequest compatibility
+  const cookieHeader = req.headers.get("cookie") || "";
+  const match = cookieHeader.match(new RegExp(`${SESSION_COOKIE}=([^;]+)`));
+  const token = match ? decodeURIComponent(match[1]) : null;
+  if (!token) return null;
+  const user = await getUserFromToken(token);
+  return user;
 }

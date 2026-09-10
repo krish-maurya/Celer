@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  allowedDevOrigins: [
-    "mushiest-eliseo-unminimised.ngrok-free.dev",
-  ],
+  // Allow Arena preview host + local dev
+  allowedDevOrigins: ["*.e2b.app", "localhost"],
 };
 
 export default nextConfig;

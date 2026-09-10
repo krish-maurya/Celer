@@ -1,36 +1,27 @@
-import { deleteSession, SESSION_COOKIE } from "@/lib/auth/session";
+import { SESSION_COOKIE, deleteSession } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
 
 export async function POST(req: NextRequest) {
-	try {
-		const token = req.cookies.get(SESSION_COOKIE)?.value;
+  try {
+    const cookieStore = await cookies();
+    const token = cookieStore.get(SESSION_COOKIE)?.value;
 
-		if (token) {
-			await deleteSession(token);
-		}
+    if (token) {
+      await deleteSession(token);
+    }
 
-		const response = NextResponse.json({
-			success: true,
-			message: "Logged out successfully"
-		});
-
-		response.cookies.set({
-			name: SESSION_COOKIE,
-			value: "",
-			httpOnly: true,
-			secure: process.env.NODE_ENV === "production",
-			sameSite: "lax",
-			path: "/",
-			maxAge: 0
-		});
-
-		return response;
-	} catch (error) {
-		console.error("Logout error:", error);
-
-		return NextResponse.json(
-			{ error: "Something went wrong" },
-			{ status: 500 }
-		);
-	}
+    const res = NextResponse.json({ success: true });
+    res.cookies.set({
+      name: SESSION_COOKIE,
+      value: "",
+      httpOnly: true,
+      path: "/",
+      expires: new Date(0),
+    });
+    return res;
+  } catch (e) {
+    console.error("Logout error", e);
+    return NextResponse.json({ success: true });
+  }
 }
