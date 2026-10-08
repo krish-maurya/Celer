@@ -25,9 +25,18 @@ export interface Email {
   isStarred: boolean;
   receivedAt: string;
   createdAt?: string;
+  mailboxId?: string | null;
   // UI-only
   avatarUrl?: string;
   avatarTone?: { bg: string; fg: string; label?: string };
+}
+
+export interface Mailbox {
+  id: string;
+  address: string;
+  name: string | null;
+  isPrimary: boolean;
+  unread?: number;
 }
 
 export interface User {

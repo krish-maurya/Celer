@@ -1,4 +1,4 @@
-import type { Counts, Email, Folder, User } from "./types";
+import type { Counts, Email, Folder, Mailbox, User } from "./types";
 
 // All requests go to /api/* which Next.js proxies to the Express backend.
 // Cookies (session) are sent automatically (same-origin).
@@ -41,13 +41,23 @@ export const api = {
 
   logout: () => request<{ success: boolean }>("/api/auth/logout", { method: "POST" }),
 
+  listMailboxes: () => request<{ success: boolean; mailboxes: Mailbox[] }>("/api/mailboxes"),
+
+  addMailbox: (address: string, name?: string) =>
+    request<{ success: boolean; mailbox: Mailbox }>("/api/mailboxes", {
+      method: "POST",
+      body: JSON.stringify({ address, name }),
+    }),
+
   listEmails: (params: {
     folder?: Folder | "ALL";
     q?: string;
     starred?: boolean;
     unread?: boolean;
+    mailboxId?: string | null;
   }) => {
     const qs = new URLSearchParams();
+    if (params.mailboxId) qs.set("mailbox", params.mailboxId);
     if (params.folder && params.folder !== "ALL") qs.set("folder", params.folder);
     if (params.folder === "ALL") qs.set("all", "true");
     if (params.q) qs.set("q", params.q);
@@ -55,6 +65,7 @@ export const api = {
     if (params.unread) qs.set("unread", "true");
     return request<{
       success: boolean;
+      mailbox: Mailbox;
       emails: Email[];
       counts: Counts;
       unread?: number;
@@ -74,13 +85,13 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  sendEmail: (payload: { to: string[]; subject: string; text: string }) =>
+  sendEmail: (payload: { to: string[]; subject: string; text: string; mailboxId?: string | null }) =>
     request<{ success: boolean; email: Email; demo?: boolean; message?: string }>(
       "/api/send-email",
       { method: "POST", body: JSON.stringify(payload) },
     ),
 
-  createDraft: (payload: { to?: string[]; subject?: string; text?: string }) =>
+  createDraft: (payload: { to?: string[]; subject?: string; text?: string; mailboxId?: string | null }) =>
     request<{ success: boolean; email: Email }>("/api/emails/drafts", {
       method: "POST",
       body: JSON.stringify(payload),

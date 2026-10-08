@@ -40,5 +40,6 @@ export function serializeEmail(row: any) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     userId: row.userId,
+    mailboxId: row.mailboxId ?? null,
   };
 }

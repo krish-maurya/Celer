@@ -9,10 +9,15 @@ export function ComposeModal({
   onClose,
   onDone,
   replyTo,
+  mailboxId,
+  fromAddress,
 }: {
   onClose: () => void;
   onDone: () => void;
   replyTo?: Email | null;
+  /** Mailbox to send from (the one being viewed, or the one a reply came in on). */
+  mailboxId?: string | null;
+  fromAddress?: string | null;
 }) {
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
@@ -47,6 +52,7 @@ export function ComposeModal({
         to: parseEmails(to),
         subject,
         text: body,
+        mailboxId,
       });
       setStatus({ kind: "ok", msg: "Draft saved." });
       onDone();
@@ -67,7 +73,12 @@ export function ComposeModal({
     setBusy(true);
     setStatus(null);
     try {
-      const res = await api.sendEmail({ to: recipients, subject: subject.trim(), text: body.trim() });
+      const res = await api.sendEmail({
+        to: recipients,
+        subject: subject.trim(),
+        text: body.trim(),
+        mailboxId,
+      });
       setStatus({
         kind: "ok",
         msg: res.demo ? "Sent — demo mode (saved to Sent)." : "Email sent.",
@@ -82,9 +93,9 @@ export function ComposeModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-end bg-zinc-900/20 backdrop-blur-[2px] sm:items-center sm:justify-center sm:p-4" onClick={onClose}>
+    <div className="celer-enter fixed inset-0 z-50 flex items-end justify-end bg-zinc-900/20 backdrop-blur-[2px] sm:items-center sm:justify-center sm:p-4" onClick={onClose}>
       <div
-        className="flex max-h-[90vh] w-full flex-col overflow-hidden border border-zinc-200 bg-white shadow-xl sm:max-w-[560px] sm:rounded-xl"
+        className="celer-pop flex max-h-[90vh] w-full flex-col overflow-hidden border border-zinc-200 bg-white shadow-xl sm:max-w-[560px] sm:rounded-xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -106,8 +117,14 @@ export function ComposeModal({
 
         {/* Fields */}
         <div className="flex flex-col">
+          {fromAddress && (
+            <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2">
+              <span className="w-14 shrink-0 text-[12px] font-medium text-zinc-500">From</span>
+              <span className="truncate text-[13px] text-zinc-700">{fromAddress}</span>
+            </div>
+          )}
           <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2">
-            <span className="w-10 shrink-0 text-[12px] font-medium text-zinc-500">To</span>
+            <span className="w-14 shrink-0 text-[12px] font-medium text-zinc-500">To</span>
             <input
               value={to}
               onChange={(e) => setTo(e.target.value)}
@@ -116,7 +133,7 @@ export function ComposeModal({
             />
           </div>
           <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2">
-            <span className="w-10 shrink-0 text-[12px] font-medium text-zinc-500">Subject</span>
+            <span className="w-14 shrink-0 text-[12px] font-medium text-zinc-500">Subject</span>
             <input
               value={subject}
               onChange={(e) => setSubject(e.target.value)}

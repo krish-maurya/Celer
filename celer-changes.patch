@@ -1,0 +1,2348 @@
+diff --git a/app/api/auth/register/route.ts b/app/api/auth/register/route.ts
+index df75d8c..0836cef 100644
+--- a/app/api/auth/register/route.ts
++++ b/app/api/auth/register/route.ts
+@@ -1,6 +1,7 @@
+ import { hashPassword } from "@/lib/auth/password";
+ import { createSession, SESSION_COOKIE } from "@/lib/auth/session";
+ import { prisma } from "@/lib/prisma";
++import { ensurePrimaryMailbox } from "@/lib/mailbox";
+ import { rateLimit } from "@/lib/rateLimit";
+ import { NextRequest, NextResponse } from "next/server";
+ 
+@@ -33,6 +34,8 @@ export async function POST(req: NextRequest) {
+       data: { email, name: name || email.split("@")[0], passwordHash },
+     });
+ 
++    await ensurePrimaryMailbox(user);
++
+     const session = await createSession(user.id);
+ 
+     const res = NextResponse.json(
+diff --git a/app/api/emails/[emailId]/draft/route.ts b/app/api/emails/[emailId]/draft/route.ts
+index 19e3ce1..cbbb5fe 100644
+--- a/app/api/emails/[emailId]/draft/route.ts
++++ b/app/api/emails/[emailId]/draft/route.ts
+@@ -24,7 +24,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ emai
+ 
+     // If sending, validate as send
+     if (shouldSend) {
+-      const to = body.to || JSON.parse(existing.to || "[]");
++      const to = body.to || JSON.parse(String(existing.to || "[]"));
+       const subject = body.subject ?? existing.subject;
+       const text = body.text ?? existing.text;
+ 
+diff --git a/app/api/emails/drafts/route.ts b/app/api/emails/drafts/route.ts
+index f7c4709..c25e46b 100644
+--- a/app/api/emails/drafts/route.ts
++++ b/app/api/emails/drafts/route.ts
+@@ -1,6 +1,7 @@
+ import { requireAuth } from "@/lib/auth/require-auth";
+ import { prisma } from "@/lib/prisma";
+ import { serializeEmail } from "@/lib/serialize";
++import { resolveMailbox } from "@/lib/mailbox";
+ import { draftSchema } from "@/lib/validations/email";
+ import { NextRequest, NextResponse } from "next/server";
+ 
+@@ -16,11 +17,13 @@ export async function POST(req: NextRequest) {
+     }
+ 
+     const { to, cc, bcc, subject, text, attachments } = parsed.data;
++    const mailbox = await resolveMailbox(user, parsed.data.mailboxId);
+ 
+     const email = await prisma.email.create({
+       data: {
+         userId: user.id,
+-        fromEmail: user.email,
++        mailboxId: mailbox.id,
++        fromEmail: mailbox.address,
+         fromName: user.name,
+         to: JSON.stringify(to),
+         cc: JSON.stringify(cc),
+diff --git a/app/api/emails/route.ts b/app/api/emails/route.ts
+index e8d2305..ae13305 100644
+--- a/app/api/emails/route.ts
++++ b/app/api/emails/route.ts
+@@ -1,6 +1,7 @@
+ import { requireAuth } from "@/lib/auth/require-auth";
++import { resolveMailbox } from "@/lib/mailbox";
+ import { prisma } from "@/lib/prisma";
+-import { serializeEmail, parseJsonArray } from "@/lib/serialize";
++import { serializeEmail } from "@/lib/serialize";
+ import { NextRequest, NextResponse } from "next/server";
+ 
+ const VALID_FOLDERS = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "ARCHIVED"] as const;
+@@ -19,6 +20,9 @@ export async function GET(req: NextRequest) {
+     const unread = searchParams.get("unread") === "true";
+     const all = searchParams.get("all") === "true";
+ 
++    // Every list is scoped to one mailbox (address). Defaults to the primary one.
++    const mailbox = await resolveMailbox(user, searchParams.get("mailbox"));
++
+     let folder: string | null = null;
+     if (folderParam && VALID_FOLDERS.includes(folderParam as any)) {
+       folder = folderParam;
+@@ -26,13 +30,12 @@ export async function GET(req: NextRequest) {
+       folder = "INBOX";
+     }
+ 
+-    // Fetch all user emails
++    // Fetch all emails for this mailbox (counts are computed over the whole mailbox)
+     const allEmailsRaw = await prisma.email.findMany({
+-      where: { userId: user.id },
++      where: { userId: user.id, mailboxId: mailbox.id },
+       orderBy: { receivedAt: "desc" },
+     });
+ 
+-    // Compute counts
+     const counts: Record<string, number> = {
+       INBOX: 0,
+       SENT: 0,
+@@ -50,7 +53,6 @@ export async function GET(req: NextRequest) {
+       if (e.isStarred) starredCount++;
+     }
+ 
+-    // Filter
+     let filtered = allEmailsRaw;
+ 
+     if (folder && folder !== "ALL") {
+@@ -76,6 +78,7 @@ export async function GET(req: NextRequest) {
+ 
+     return NextResponse.json({
+       success: true,
++      mailbox: { id: mailbox.id, address: mailbox.address, name: mailbox.name, isPrimary: mailbox.isPrimary },
+       emails,
+       counts,
+       unread: unreadCount,
+diff --git a/app/api/mailboxes/route.ts b/app/api/mailboxes/route.ts
+new file mode 100644
+index 0000000..6403b18
+--- /dev/null
++++ b/app/api/mailboxes/route.ts
+@@ -0,0 +1,89 @@
++import { requireAuth } from "@/lib/auth/require-auth";
++import { ensurePrimaryMailbox, serializeMailbox } from "@/lib/mailbox";
++import { prisma } from "@/lib/prisma";
++import { NextRequest, NextResponse } from "next/server";
++import { z } from "zod";
++
++const createSchema = z.object({
++  address: z.email("Enter a valid email address").max(254),
++  name: z.string().trim().max(60).optional(),
++});
++
++/** All email addresses assigned to the signed-in account, with unread counts. */
++export async function GET() {
++  try {
++    const user = await requireAuth();
++    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
++
++    await ensurePrimaryMailbox(user);
++
++    const [mailboxes, unreadGroups] = await Promise.all([
++      prisma.mailbox.findMany({
++        where: { userId: user.id },
++        orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
++      }),
++      prisma.email.groupBy({
++        by: ["mailboxId"],
++        where: { userId: user.id, folder: "INBOX", isRead: false },
++        _count: { _all: true },
++      }),
++    ]);
++
++    const unreadById = new Map(unreadGroups.map((g) => [g.mailboxId, g._count._all]));
++
++    return NextResponse.json({
++      success: true,
++      mailboxes: mailboxes.map((mb) => ({
++        ...serializeMailbox(mb),
++        unread: unreadById.get(mb.id) ?? 0,
++      })),
++    });
++  } catch (e) {
++    console.error("List mailboxes error:", e);
++    return NextResponse.json({ error: "Failed to load mailboxes" }, { status: 500 });
++  }
++}
++
++/** Assign an extra email address to the signed-in account. */
++export async function POST(req: NextRequest) {
++  try {
++    const user = await requireAuth();
++    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
++
++    const parsed = createSchema.safeParse(await req.json().catch(() => null));
++    if (!parsed.success) {
++      return NextResponse.json(
++        { error: parsed.error.issues[0]?.message ?? "Invalid email address" },
++        { status: 400 },
++      );
++    }
++
++    const address = parsed.data.address.trim().toLowerCase();
++    const taken = await prisma.mailbox.findUnique({ where: { address } });
++    if (taken) {
++      return NextResponse.json(
++        {
++          error:
++            taken.userId === user.id
++              ? "You already have this address."
++              : "This address is already linked to another account.",
++        },
++        { status: 409 },
++      );
++    }
++
++    await ensurePrimaryMailbox(user);
++    const name = parsed.data.name || address.split("@")[0];
++    const mb = await prisma.mailbox.create({
++      data: { userId: user.id, address, name, isPrimary: false },
++    });
++
++    return NextResponse.json(
++      { success: true, mailbox: { ...serializeMailbox(mb), unread: 0 } },
++      { status: 201 },
++    );
++  } catch (e) {
++    console.error("Create mailbox error:", e);
++    return NextResponse.json({ error: "Failed to add email" }, { status: 500 });
++  }
++}
+diff --git a/app/api/send-email/route.ts b/app/api/send-email/route.ts
+index d007ba5..16376e7 100644
+--- a/app/api/send-email/route.ts
++++ b/app/api/send-email/route.ts
+@@ -2,6 +2,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
+ import { prisma } from "@/lib/prisma";
+ import { sendEmailSchema } from "@/lib/validations/email";
+ import { serializeEmail } from "@/lib/serialize";
++import { resolveMailbox } from "@/lib/mailbox";
+ import { getResend, getResendFrom, isResendConfigured } from "@/lib/resend";
+ import { NextRequest, NextResponse } from "next/server";
+ 
+@@ -20,6 +21,7 @@ export async function POST(req: NextRequest) {
+     }
+ 
+     const { to, cc, bcc, subject, text, html, attachments } = result.data;
++    const mailbox = await resolveMailbox(user, result.data.mailboxId);
+ 
+     const resend = getResend();
+     let resendId: string | null = null;
+@@ -50,7 +52,8 @@ export async function POST(req: NextRequest) {
+     const saved = await prisma.email.create({
+       data: {
+         userId: user.id,
+-        fromEmail: user.email,
++        mailboxId: mailbox.id,
++        fromEmail: mailbox.address,
+         fromName: user.name,
+         to: JSON.stringify(Array.isArray(to) ? to : [to]),
+         cc: JSON.stringify(cc || []),
+diff --git a/app/api/webhooks/resend/route.ts b/app/api/webhooks/resend/route.ts
+index be8e5cf..19d027c 100644
+--- a/app/api/webhooks/resend/route.ts
++++ b/app/api/webhooks/resend/route.ts
+@@ -1,6 +1,7 @@
+ import { prisma } from "@/lib/prisma";
+ import { receivedEmail } from "@/lib/validations/email";
+ import { getResend } from "@/lib/resend";
++import { ensurePrimaryMailbox } from "@/lib/mailbox";
+ import { NextRequest, NextResponse } from "next/server";
+ 
+ function parseSender(value: string) {
+@@ -75,9 +76,12 @@ export async function POST(req: NextRequest) {
+       return NextResponse.json({ error: "Received email has no recipient" }, { status: 400 });
+     }
+ 
+-    const user = await prisma.user.findUnique({
+-      where: { email: recipient.trim().toLowerCase() },
++    const address = recipient.trim().toLowerCase();
++    const mailbox = await prisma.mailbox.findUnique({
++      where: { address },
++      include: { user: true },
+     });
++    const user = mailbox?.user ?? (await prisma.user.findUnique({ where: { email: address } }));
+ 
+     if (!user) {
+       return NextResponse.json({ error: "No registered user found for this recipient" }, { status: 404 });
+@@ -108,6 +112,7 @@ export async function POST(req: NextRequest) {
+         html: email.html || "",
+         receivedAt: new Date(event.created_at),
+         userId: user.id,
++        mailboxId: mailbox?.id ?? (await ensurePrimaryMailbox(user)).id,
+         folder: "INBOX",
+       },
+     });
+diff --git a/app/globals.css b/app/globals.css
+index cdfd713..0858c4a 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -68,3 +68,107 @@ input:focus-visible {
+   outline: 2px solid var(--ink);
+   outline-offset: 2px;
+ }
++
++/* ---------- Motion system ----------
++   One easing curve + one duration for every layout change so the list,
++   reading pane, tabs and menus all move together. */
++:root {
++  --ease-glide: cubic-bezier(0.32, 0.72, 0, 1);
++  --dur-glide: 480ms;
++}
++
++/* Mail list + reading pane. The list shrinks while the reader slides in from
++   the right; both use the same curve, so the reader's left edge always sits
++   exactly on the list's right edge. */
++.celer-list {
++  width: 100%;
++  transition: width var(--dur-glide) var(--ease-glide);
++  will-change: width;
++}
++@media (min-width: 768px) {
++  .celer-list.is-open {
++    width: 380px;
++  }
++}
++
++.celer-reader {
++  position: absolute;
++  top: 0;
++  bottom: 0;
++  right: 0;
++  width: 100%;
++  transform: translate3d(100%, 0, 0);
++  transition: transform var(--dur-glide) var(--ease-glide);
++  will-change: transform;
++}
++.celer-reader.is-open {
++  transform: translate3d(0, 0, 0);
++}
++@media (min-width: 768px) {
++  .celer-reader {
++    width: calc(100% - 380px);
++  }
++}
++
++/* Content fade-in (list sections, email body, dialogs). */
++@keyframes celer-enter {
++  from {
++    opacity: 0;
++    transform: translate3d(0, 6px, 0);
++  }
++  to {
++    opacity: 1;
++    transform: none;
++  }
++}
++.celer-enter {
++  animation: celer-enter 320ms var(--ease-glide) both;
++}
++
++@keyframes celer-pop {
++  from {
++    opacity: 0;
++    transform: translate3d(0, 10px, 0) scale(0.98);
++  }
++  to {
++    opacity: 1;
++    transform: none;
++  }
++}
++.celer-pop {
++  animation: celer-pop 300ms var(--ease-glide) both;
++}
++
++/* Hover menus: always mounted, animated with opacity + transform. */
++.celer-menu {
++  transform-origin: top right;
++  transition:
++    opacity 180ms ease-out,
++    transform 260ms var(--ease-glide),
++    visibility 0s linear 260ms;
++  visibility: hidden;
++  opacity: 0;
++  transform: translate3d(0, -6px, 0) scale(0.97);
++}
++.celer-menu.is-open {
++  visibility: visible;
++  opacity: 1;
++  transform: none;
++  transition-delay: 0s;
++}
++
++/* Sliding thumb for segmented controls. */
++.celer-thumb {
++  transition:
++    transform var(--dur-glide) var(--ease-glide),
++    width var(--dur-glide) var(--ease-glide);
++}
++
++@media (prefers-reduced-motion: reduce) {
++  *,
++  *::before,
++  *::after {
++    animation-duration: 1ms !important;
++    transition-duration: 1ms !important;
++  }
++}
+diff --git a/app/mail.tsx b/app/mail.tsx
+index 9aaeb11..c597972 100644
+--- a/app/mail.tsx
++++ b/app/mail.tsx
+@@ -1,19 +1,35 @@
+ "use client";
+ 
+-import { useCallback, useEffect, useMemo, useState } from "react";
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { useAuth } from "@/components/AuthProvider";
+ import { Sidebar, type RailView } from "@/components/Sidebar";
+ import { EmailList } from "@/components/EmailList";
+ import { ReadingPane } from "@/components/ReadingPane";
+ import { ComposeModal } from "@/components/ComposeModal";
+-import { ComposeIcon, InboxIcon, SendIcon, DraftsIcon } from "@/components/icons";
+-import { CelerMark } from "@/components/CelerLogo";
++import { ProfileMenu } from "@/components/ProfileMenu";
++import { Segmented, type SegmentItem } from "@/components/Segmented";
++import {
++  ArchiveIcon,
++  ComposeIcon,
++  DraftsIcon,
++  FilterIcon,
++  InboxIcon,
++  CloseIcon,
++  MailIcon,
++  MailOpenIcon,
++  SearchIcon,
++  SendIcon,
++  StarIcon,
++  TrashIcon,
++} from "@/components/icons";
+ import { api } from "@/lib/api";
+ import { toneFor } from "@/lib/avatars";
+-import { formatCount, type Counts, type Email, type Folder } from "@/lib/types";
++import { formatCount, type Counts, type Email, type Folder, type Mailbox } from "@/lib/types";
+ 
+ type Tab = "inbox" | "sent" | "drafts";
+ 
++const MAILBOX_STORAGE_KEY = "celer.mailbox";
++
+ function decorate(e: Email): Email {
+   return { ...e, avatarTone: toneFor(e.fromEmail || (e.to[0] ?? "x@x.com")) };
+ }
+@@ -27,6 +43,16 @@ const EMPTY_COUNTS: Counts = {
+   ARCHIVED: 0,
+ };
+ 
++const VIEW_META: Record<
++  Exclude<RailView, "inbox" | "disabled-folder" | "disabled-contacts" | "disabled-notes">,
++  { label: string; Icon: typeof InboxIcon; hint: string }
++> = {
++  starred: { label: "Starred", Icon: StarIcon, hint: "Starred emails from every folder" },
++  unread: { label: "Unread", Icon: MailOpenIcon, hint: "Unread emails in your inbox" },
++  archive: { label: "Archive", Icon: ArchiveIcon, hint: "Archived emails are hidden from your inbox" },
++  trash: { label: "Trash", Icon: TrashIcon, hint: "Delete again to remove an email forever" },
++};
++
+ export function MailApp() {
+   const { user, logout } = useAuth();
+   const [emails, setEmails] = useState<Email[]>([]);
+@@ -34,21 +60,56 @@ export function MailApp() {
+   const [meta, setMeta] = useState({ unread: 0, starred: 0 });
+   const [loading, setLoading] = useState(true);
+ 
++  const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
++  const [activeId, setActiveId] = useState<string | null>(null);
++
+   const [tab, setTab] = useState<Tab>("inbox");
+   const [view, setView] = useState<RailView>("inbox");
+   const [selectedId, setSelectedId] = useState<string | null>(null);
+   const [query, setQuery] = useState("");
+   const [debouncedQuery, setDebouncedQuery] = useState("");
+   const [composing, setComposing] = useState(false);
++  const [composeMailboxId, setComposeMailboxId] = useState<string | null>(null);
+   const [replyTo, setReplyTo] = useState<Email | null>(null);
+-  const [showUserMenu, setShowUserMenu] = useState(false);
++
++  // Keeps the last opened email mounted while the reader slides out.
++  const [lastOpened, setLastOpened] = useState<Email | null>(null);
++
++  const requestSeq = useRef(0);
+ 
+   useEffect(() => {
+     const t = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+     return () => clearTimeout(t);
+   }, [query]);
+ 
++  const refreshMailboxes = useCallback(async () => {
++    try {
++      const res = await api.listMailboxes();
++      setMailboxes(res.mailboxes);
++      return res.mailboxes;
++    } catch {
++      return null;
++    }
++  }, []);
++
++  // Pick the starting mailbox: last used, otherwise the primary address.
++  useEffect(() => {
++    (async () => {
++      const list = await refreshMailboxes();
++      if (!list || list.length === 0) return;
++      const stored = window.localStorage.getItem(MAILBOX_STORAGE_KEY);
++      const pick = list.find((m) => m.id === stored) ?? list.find((m) => m.isPrimary) ?? list[0];
++      setActiveId(pick.id);
++    })();
++  }, [refreshMailboxes]);
++
++  useEffect(() => {
++    if (activeId) window.localStorage.setItem(MAILBOX_STORAGE_KEY, activeId);
++  }, [activeId]);
++
+   const load = useCallback(async () => {
++    if (!activeId) return;
++    const seq = ++requestSeq.current;
+     setLoading(true);
+     try {
+       let folder: Folder | "ALL" = "INBOX";
+@@ -71,19 +132,21 @@ export function MailApp() {
+         q: debouncedQuery || undefined,
+         starred,
+         unread,
++        mailboxId: activeId,
+       });
++      if (seq !== requestSeq.current) return; // a newer request superseded this one
++
+       const list = res.emails.map(decorate);
+       setEmails(list);
+       setCounts(res.counts ?? EMPTY_COUNTS);
+       setMeta({ unread: res.unread ?? 0, starred: res.starred ?? 0 });
+-      // Keep selected if still exists, else clear
+       setSelectedId((cur) => (cur && list.some((e) => e.id === cur) ? cur : null));
+     } catch (err) {
+       console.error(err);
+     } finally {
+-      setLoading(false);
++      if (seq === requestSeq.current) setLoading(false);
+     }
+-  }, [view, tab, debouncedQuery]);
++  }, [view, tab, debouncedQuery, activeId]);
+ 
+   useEffect(() => {
+     load();
+@@ -91,6 +154,13 @@ export function MailApp() {
+ 
+   const selected = useMemo(() => emails.find((e) => e.id === selectedId) ?? null, [emails, selectedId]);
+ 
++  useEffect(() => {
++    if (selected) setLastOpened(selected);
++  }, [selected]);
++
++  const readerOpen = !!selected;
++  const readerEmail = selected ?? lastOpened;
++
+   const optimistic = useCallback((id: string, patch: Partial<Email>) => {
+     setEmails((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+   }, []);
+@@ -174,21 +244,35 @@ export function MailApp() {
+     [optimistic],
+   );
+ 
+-  const openReply = useCallback((email: Email) => {
+-    setReplyTo(email);
+-    setComposing(true);
+-  }, []);
++  const openReply = useCallback(
++    (email: Email) => {
++      setReplyTo(email);
++      setComposeMailboxId(email.mailboxId ?? activeId);
++      setComposing(true);
++    },
++    [activeId],
++  );
+ 
+   const openCompose = useCallback(() => {
+     setReplyTo(null);
++    setComposeMailboxId(activeId);
+     setComposing(true);
+-  }, []);
++  }, [activeId]);
++
++  const switchMailbox = useCallback(
++    (mb: Mailbox) => {
++      if (mb.id === activeId) return;
++      setActiveId(mb.id);
++      setView("inbox");
++      setTab("inbox");
++      setSelectedId(null);
++      setQuery("");
++    },
++    [activeId],
++  );
+ 
+-  const tabs: { key: Tab; label: string; Icon: typeof InboxIcon; count?: number }[] = [
+-    { key: "inbox", label: "Inbox", Icon: InboxIcon, count: counts.INBOX },
+-    { key: "sent", label: "Sent", Icon: SendIcon, count: counts.SENT },
+-    { key: "drafts", label: "Drafts", Icon: DraftsIcon, count: counts.DRAFT },
+-  ];
++  const activeMailbox = mailboxes.find((m) => m.id === activeId) ?? null;
++  const composeMailbox = mailboxes.find((m) => m.id === composeMailboxId) ?? activeMailbox;
+ 
+   const currentLabel =
+     view === "starred"
+@@ -220,17 +304,50 @@ export function MailApp() {
+                   : "INBOX"
+         ] ?? emails.length;
+ 
++  // Section bar: inbox shows its own folder tabs; every other section shows only itself.
++  const inInbox = view === "inbox";
++  const segmentItems: SegmentItem<string>[] = inInbox
++    ? [
++        { key: "inbox", label: "Inbox", Icon: InboxIcon, count: counts.INBOX },
++        { key: "sent", label: "Sent", Icon: SendIcon, count: counts.SENT },
++        { key: "drafts", label: "Drafts", Icon: DraftsIcon, count: counts.DRAFT },
++      ]
++    : [
++        {
++          key: view,
++          label: VIEW_META[view as keyof typeof VIEW_META]?.label ?? currentLabel,
++          Icon: VIEW_META[view as keyof typeof VIEW_META]?.Icon ?? InboxIcon,
++          count: currentCount,
++        },
++      ];
++  const segmentValue = inInbox ? tab : view;
++
++  const onSegment = (key: string) => {
++    if (inInbox) {
++      setTab(key as Tab);
++      setSelectedId(null);
++    }
++  };
++
++  const hint = !inInbox ? VIEW_META[view as keyof typeof VIEW_META]?.hint : null;
++
+   const emptyLabel = debouncedQuery
+     ? `No results for “${debouncedQuery}”.`
+     : view === "trash"
+       ? "Trash is empty."
+       : view === "archive"
+         ? "No archived emails."
+-        : tab === "sent"
+-          ? "No sent emails yet."
+-          : tab === "drafts"
+-            ? "No drafts."
+-            : "Inbox zero.";
++        : view === "starred"
++          ? "No starred emails."
++          : view === "unread"
++            ? "No unread emails."
++            : tab === "sent"
++              ? "No sent emails yet."
++              : tab === "drafts"
++                ? "No drafts."
++                : "Inbox zero.";
++
++  const listKey = `${activeId}|${view}|${inInbox ? tab : ""}`;
+ 
+   return (
+     <div className="flex h-screen w-screen overflow-hidden bg-white">
+@@ -247,96 +364,69 @@ export function MailApp() {
+       />
+ 
+       <div className="flex min-w-0 flex-1 flex-col">
+-        {/* Header - with consistent logo */}
+-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-line bg-white px-4">
+-          <div className="flex items-center gap-4">
+-            <CelerMark size={20} />
+-            <div className="h-4 w-px bg-zinc-200" />
+-            <div className="flex items-center gap-2">
+-              <h1 className="text-[14px] font-semibold tracking-tight text-zinc-900">{currentLabel}</h1>
+-              <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-600">
+-                {formatCount(currentCount)}
+-              </span>
+-            </div>
++        {/* Top bar: section name + search, profile on the right */}
++        <header className="flex h-14 shrink-0 items-center gap-4 border-b border-line bg-white pl-5 pr-3">
++          <div className="flex shrink-0 items-center gap-2.5">
++            <h1
++              key={currentLabel}
++              className="celer-enter text-[15px] font-semibold tracking-tight text-zinc-900"
++            >
++              {currentLabel}
++            </h1>
++            <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-600">
++              {formatCount(currentCount)}
++            </span>
+           </div>
+ 
+-          <div className="flex items-center gap-2">
+-            {/* User account with hover menu */}
+-            <div className="relative">
++          <div className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg bg-zinc-50 px-3 ring-1 ring-zinc-900/[0.05] transition-[background-color,box-shadow] duration-200 focus-within:bg-white focus-within:ring-zinc-900/15">
++            <SearchIcon size={16} className="shrink-0 text-zinc-400" />
++            <input
++              value={query}
++              onChange={(e) => setQuery(e.target.value)}
++              placeholder={`Search ${currentLabel.toLowerCase()}`}
++              aria-label="Search"
++              className="min-w-0 flex-1 bg-transparent text-[13.5px] text-zinc-900 outline-none placeholder:text-zinc-400"
++            />
++            {query && (
+               <button
+-                onClick={() => setShowUserMenu((v) => !v)}
+-                onMouseEnter={() => setShowUserMenu(true)}
+-                className="flex items-center gap-2.5 rounded-full border border-zinc-200 bg-white px-1.5 py-1 pr-3 transition-colors hover:border-zinc-300 hover:bg-zinc-50"
++                type="button"
++                onClick={() => setQuery("")}
++                aria-label="Clear search"
++                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors duration-200 hover:bg-zinc-100 hover:text-zinc-700"
+               >
+-                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-[11px] font-medium text-white">
+-                  {user?.name?.[0]?.toUpperCase() || "U"}
+-                </div>
+-                <div className="hidden text-left sm:block">
+-                  <p className="max-w-[100px] truncate text-[12.5px] font-medium leading-none text-zinc-900">
+-                    {user?.name}
+-                  </p>
+-                  <p className="max-w-[100px] truncate text-[10px] leading-none text-zinc-500">
+-                    {user?.email}
+-                  </p>
+-                </div>
++                <CloseIcon size={13} />
+               </button>
+-
+-              {/* Hover / click menu */}
+-              {showUserMenu && (
+-                <div
+-                  onMouseLeave={() => setShowUserMenu(false)}
+-                  className="absolute right-0 top-full z-40 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-2 shadow-lg"
+-                >
+-                  <div className="flex items-center gap-3 rounded-lg bg-zinc-50 p-3">
+-                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-[13px] font-medium text-white">
+-                      {user?.name?.[0]?.toUpperCase() || "U"}
+-                    </div>
+-                    <div className="min-w-0 flex-1">
+-                      <p className="truncate text-[13px] font-semibold text-zinc-900">{user?.name}</p>
+-                      <p className="truncate text-[11.5px] text-zinc-500">{user?.email}</p>
+-                    </div>
+-                  </div>
+-
+-                  <div className="mt-2 space-y-1">
+-                    <div className="flex items-center justify-between rounded-lg px-3 py-2 text-[12.5px] text-zinc-700">
+-                      <span>All mail</span>
+-                      <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium">
+-                        {counts.INBOX + counts.SENT + counts.DRAFT}
+-                      </span>
+-                    </div>
+-                    <div className="flex items-center justify-between rounded-lg px-3 py-2 text-[12.5px] text-zinc-700">
+-                      <span>Unread</span>
+-                      <span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white">
+-                        {meta.unread}
+-                      </span>
+-                    </div>
+-                    <div className="flex items-center justify-between rounded-lg px-3 py-2 text-[12.5px] text-zinc-700">
+-                      <span>Starred</span>
+-                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+-                        {meta.starred}
+-                      </span>
+-                    </div>
+-                  </div>
+-
+-                  <div className="my-2 h-px bg-zinc-100" />
+-
+-                  <button
+-                    onClick={logout}
+-                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 py-2 text-[12.5px] font-medium text-white hover:bg-black"
+-                  >
+-                    Sign out
+-                  </button>
+-                </div>
+-              )}
+-            </div>
++            )}
++            <button
++              type="button"
++              aria-label="Filter"
++              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors duration-200 hover:bg-zinc-100 hover:text-zinc-700"
++            >
++              <FilterIcon size={16} />
++            </button>
+           </div>
++
++          <ProfileMenu
++            user={user}
++            mailboxes={mailboxes}
++            activeId={activeId}
++            onSelect={switchMailbox}
++            onAdded={(mb) => {
++              setMailboxes((prev) => (prev.some((m) => m.id === mb.id) ? prev : [...prev, mb]));
++              refreshMailboxes();
++              switchMailbox(mb);
++            }}
++            onOpen={refreshMailboxes}
++            onLogout={logout}
++          />
+         </header>
+ 
+-        {/* Tabs */}
++        {/* Section bar: compose + the tabs that belong to the current section */}
+         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-[#fcfcfa] px-3">
+           <button
++            type="button"
+             onClick={openCompose}
+-            className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-[12.5px] font-medium text-white shadow-sm hover:bg-black"
++            className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-[12.5px] font-medium text-white shadow-sm transition-colors duration-200 hover:bg-black"
+           >
+             <ComposeIcon size={14} strokeWidth={2} />
+             Compose
+@@ -344,66 +434,54 @@ export function MailApp() {
+ 
+           <div className="mx-1 h-4 w-px bg-zinc-200" />
+ 
+-          <div className="flex items-center gap-0.5 rounded-lg bg-zinc-100 p-0.5">
+-            {tabs.map(({ key, label, Icon, count }) => {
+-              const active = tab === key && (view === "inbox" || view === "starred" || view === "unread");
+-              return (
+-                <button
+-                  key={key}
+-                  onClick={() => {
+-                    setTab(key);
+-                    setView("inbox");
+-                    setQuery("");
+-                  }}
+-                  className={`inline-flex h-6 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-medium transition-colors ${
+-                    active
+-                      ? "bg-white text-zinc-900 shadow-sm ring-1 ring-zinc-900/5"
+-                      : "text-zinc-500 hover:text-zinc-700"
+-                  }`}
+-                >
+-                  <Icon size={13} strokeWidth={active ? 2 : 1.6} />
+-                  {label}
+-                  {count !== undefined && count > 0 && (
+-                    <span className={`ml-0.5 text-[11px] ${active ? "text-zinc-500" : "text-zinc-400"}`}>
+-                      {count}
+-                    </span>
+-                  )}
+-                </button>
+-              );
+-            })}
++          <Segmented items={segmentItems} value={segmentValue} onChange={onSegment} />
++
++          <div className="ml-auto flex min-w-0 items-center gap-3">
++            {hint && (
++              <span key={view} className="celer-enter hidden truncate text-[12px] text-zinc-400 lg:block">
++                {hint}
++              </span>
++            )}
++            {mailboxes.length > 1 && activeMailbox && (
++              <span
++                key={activeMailbox.id}
++                className="celer-enter inline-flex max-w-[260px] shrink-0 items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[11.5px] text-zinc-600 ring-1 ring-zinc-900/[0.08]"
++                title="Viewing this address"
++              >
++                <MailIcon size={12} className="shrink-0 text-zinc-400" />
++                <span className="truncate">{activeMailbox.address}</span>
++              </span>
++            )}
+           </div>
+         </div>
+ 
+-        {/* Main - email list full width when no selection, slide-in reading pane */}
++        {/* Main: list + reading pane. The list shrinks while the reader glides in. */}
+         <div className="relative flex min-h-0 flex-1 overflow-hidden">
+-          {/* Email list - full width when no selected, 380px when selected */}
+           <div
+-            className={`flex shrink-0 flex-col border-r border-line bg-white transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
+-              selected ? "w-[380px] min-w-[340px] max-w-[420px]" : "w-full"
++            className={`celer-list flex min-h-0 min-w-0 flex-col bg-white ${
++              readerOpen ? "is-open border-r border-line" : ""
+             }`}
+           >
+-            <EmailList
+-              emails={emails}
+-              selectedId={selectedId}
+-              loading={loading}
+-              emptyLabel={emptyLabel}
+-              onSelect={selectEmail}
+-              onToggleStar={toggleStar}
+-              query={query}
+-              onQuery={setQuery}
+-              title={currentLabel}
+-            />
++            <div key={listKey} className="celer-enter flex min-h-0 flex-1 flex-col">
++              <EmailList
++                emails={emails}
++                selectedId={selectedId}
++                loading={loading}
++                emptyLabel={emptyLabel}
++                onSelect={selectEmail}
++                onToggleStar={toggleStar}
++                query={query}
++              />
++            </div>
+           </div>
+ 
+-          {/* Reading pane - slide in sandbox */}
+           <div
+-            className={`absolute inset-y-0 right-0 flex w-full flex-col bg-white shadow-[-8px_0_24px_rgba(0,0,0,0.06)] transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] md:relative md:w-auto md:flex-1 md:shadow-none ${
+-              selected ? "translate-x-0" : "translate-x-full md:translate-x-full md:hidden"
+-            }`}
++            className={`celer-reader bg-white ${readerOpen ? "is-open shadow-[-8px_0_24px_rgba(0,0,0,0.06)]" : ""}`}
++            inert={!readerOpen}
+           >
+-            {selected && (
++            {readerEmail && (
+               <ReadingPane
+-                email={selected}
++                email={readerEmail}
+                 onClose={closeReading}
+                 onArchive={archive}
+                 onTrash={trash}
+@@ -414,21 +492,14 @@ export function MailApp() {
+               />
+             )}
+           </div>
+-
+-          {/* Mobile overlay when reading open */}
+-          {selected && (
+-            <button
+-              onClick={closeReading}
+-              className="absolute inset-0 z-0 bg-zinc-900/5 backdrop-blur-[1px] md:hidden"
+-              aria-label="Close email"
+-            />
+-          )}
+         </div>
+       </div>
+ 
+       {composing && (
+         <ComposeModal
+           replyTo={replyTo}
++          mailboxId={composeMailboxId}
++          fromAddress={composeMailbox?.address ?? null}
+           onClose={() => {
+             setComposing(false);
+             setReplyTo(null);
+diff --git a/components/CelerLogo.tsx b/components/CelerLogo.tsx
+index 6a08b68..1a78041 100644
+--- a/components/CelerLogo.tsx
++++ b/components/CelerLogo.tsx
+@@ -7,11 +7,9 @@ const poppins = Poppins({
+ 
+ /**
+  * Celer wordmark — a red-orange gradient bar to the left of the word "celer".
+- * Faithful port of the supplied standalone HTML/CSS logo.
++ * Used on the login page.
+  *
+  * size = font size of the wordmark in px; the bar scales relative to it.
+- * tone = "dark" renders the dark rounded tile with the white bar (as used for
+- *        the active product switcher in the rail).
+  */
+ export function CelerMark({
+   size = 20,
+@@ -26,18 +24,7 @@ export function CelerMark({
+       className="inline-flex select-none items-center"
+       style={{ gap: size * 0.19 }}
+     >
+-      <span
+-        aria-hidden
+-        style={{
+-          // Faithful to the supplied logo: a long thick horizontal bar (0.9em × 0.16em)
+-          width: size * 0.62,
+-          height: size * 0.15,
+-          marginTop: size * 0.18,
+-          borderRadius: Math.max(2, size * 0.04),
+-          background: "linear-gradient(90deg, var(--brand-start), var(--brand-end))",
+-          flexShrink: 0,
+-        }}
+-      />
++      <CelerBar size={size} />
+       <span
+         className={poppins.className}
+         style={{
+@@ -54,21 +41,22 @@ export function CelerMark({
+   );
+ }
+ 
+-/** The filled dark rounded tile from the rail, containing just the gradient bar. */
+-export function CelerTile() {
++/**
++ * The gradient bar on its own — the exact bar from the wordmark, with no text.
++ * Same gradient and proportions as the logo bar (size = wordmark font size).
++ */
++export function CelerBar({ size = 20, className }: { size?: number; className?: string }) {
+   return (
+     <span
+-      aria-hidden
+-      className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#1f1f1f]"
+-    >
+-      <span
+-        style={{
+-          width: 21,
+-          height: 12,
+-          borderRadius: 3,
+-          background: "linear-gradient(90deg, var(--brand-start), var(--brand-end))",
+-        }}
+-      />
+-    </span>
++      aria-label="Celer"
++      role="img"
++      className={`inline-block shrink-0 ${className ?? ""}`}
++      style={{
++        width: size * 0.62,
++        height: size * 0.15,
++        borderRadius: Math.max(2, size * 0.04),
++        background: "linear-gradient(90deg, var(--brand-start), var(--brand-end))",
++      }}
++    />
+   );
+ }
+diff --git a/components/ComposeModal.tsx b/components/ComposeModal.tsx
+index 7525dc6..35918be 100644
+--- a/components/ComposeModal.tsx
++++ b/components/ComposeModal.tsx
+@@ -9,10 +9,15 @@ export function ComposeModal({
+   onClose,
+   onDone,
+   replyTo,
++  mailboxId,
++  fromAddress,
+ }: {
+   onClose: () => void;
+   onDone: () => void;
+   replyTo?: Email | null;
++  /** Mailbox to send from (the one being viewed, or the one a reply came in on). */
++  mailboxId?: string | null;
++  fromAddress?: string | null;
+ }) {
+   const [to, setTo] = useState("");
+   const [subject, setSubject] = useState("");
+@@ -47,6 +52,7 @@ export function ComposeModal({
+         to: parseEmails(to),
+         subject,
+         text: body,
++        mailboxId,
+       });
+       setStatus({ kind: "ok", msg: "Draft saved." });
+       onDone();
+@@ -67,7 +73,12 @@ export function ComposeModal({
+     setBusy(true);
+     setStatus(null);
+     try {
+-      const res = await api.sendEmail({ to: recipients, subject: subject.trim(), text: body.trim() });
++      const res = await api.sendEmail({
++        to: recipients,
++        subject: subject.trim(),
++        text: body.trim(),
++        mailboxId,
++      });
+       setStatus({
+         kind: "ok",
+         msg: res.demo ? "Sent — demo mode (saved to Sent)." : "Email sent.",
+@@ -82,9 +93,9 @@ export function ComposeModal({
+   }
+ 
+   return (
+-    <div className="fixed inset-0 z-50 flex items-end justify-end bg-zinc-900/20 backdrop-blur-[2px] sm:items-center sm:justify-center sm:p-4" onClick={onClose}>
++    <div className="celer-enter fixed inset-0 z-50 flex items-end justify-end bg-zinc-900/20 backdrop-blur-[2px] sm:items-center sm:justify-center sm:p-4" onClick={onClose}>
+       <div
+-        className="flex max-h-[90vh] w-full flex-col overflow-hidden border border-zinc-200 bg-white shadow-xl sm:max-w-[560px] sm:rounded-xl"
++        className="celer-pop flex max-h-[90vh] w-full flex-col overflow-hidden border border-zinc-200 bg-white shadow-xl sm:max-w-[560px] sm:rounded-xl"
+         onClick={(e) => e.stopPropagation()}
+         role="dialog"
+         aria-modal="true"
+@@ -106,8 +117,14 @@ export function ComposeModal({
+ 
+         {/* Fields */}
+         <div className="flex flex-col">
++          {fromAddress && (
++            <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2">
++              <span className="w-14 shrink-0 text-[12px] font-medium text-zinc-500">From</span>
++              <span className="truncate text-[13px] text-zinc-700">{fromAddress}</span>
++            </div>
++          )}
+           <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2">
+-            <span className="w-10 shrink-0 text-[12px] font-medium text-zinc-500">To</span>
++            <span className="w-14 shrink-0 text-[12px] font-medium text-zinc-500">To</span>
+             <input
+               value={to}
+               onChange={(e) => setTo(e.target.value)}
+@@ -116,7 +133,7 @@ export function ComposeModal({
+             />
+           </div>
+           <div className="flex items-center gap-2 border-b border-zinc-100 px-3 py-2">
+-            <span className="w-10 shrink-0 text-[12px] font-medium text-zinc-500">Subject</span>
++            <span className="w-14 shrink-0 text-[12px] font-medium text-zinc-500">Subject</span>
+             <input
+               value={subject}
+               onChange={(e) => setSubject(e.target.value)}
+diff --git a/components/EmailList.tsx b/components/EmailList.tsx
+index 4ae35cf..16baba2 100644
+--- a/components/EmailList.tsx
++++ b/components/EmailList.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ 
+ import { Avatar, VerifiedBadge } from "./Avatar";
+-import { FilterIcon, StarIcon, PaperclipIcon, SearchIcon } from "./icons";
++import { StarIcon, PaperclipIcon } from "./icons";
+ import { formatDate, type Email } from "@/lib/types";
+ 
+ export function EmailList({
+@@ -12,8 +12,6 @@ export function EmailList({
+   onSelect,
+   onToggleStar,
+   query,
+-  onQuery,
+-  title,
+ }: {
+   emails: Email[];
+   selectedId: string | null;
+@@ -22,31 +20,10 @@ export function EmailList({
+   onSelect: (e: Email) => void;
+   onToggleStar: (e: Email) => void;
+   query: string;
+-  onQuery: (q: string) => void;
+-  title: string;
+ }) {
+   return (
+     <section className="flex min-h-0 flex-1 flex-col">
+-      {/* Search */}
+-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3">
+-        <div className="flex h-8 flex-1 items-center gap-2 rounded-lg bg-zinc-50 px-2.5 ring-1 ring-zinc-900/[0.04] focus-within:bg-white focus-within:ring-zinc-900/10">
+-          <SearchIcon size={16} className="shrink-0 text-zinc-400" />
+-          <input
+-            value={query}
+-            onChange={(e) => onQuery(e.target.value)}
+-            placeholder={`Search ${title.toLowerCase()}`}
+-            className="w-full bg-transparent text-[13.5px] text-zinc-900 outline-none placeholder:text-zinc-400"
+-          />
+-        </div>
+-        <button
+-          className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-50 hover:text-zinc-700"
+-          aria-label="Filter"
+-        >
+-          <FilterIcon size={16} />
+-        </button>
+-      </div>
+-
+-      <div className="celer-scroll flex-1 overflow-y-auto">
++      <div className="celer-scroll min-h-0 flex-1 overflow-y-auto">
+         {loading && (
+           <div className="space-y-3 p-3">
+             {[1, 2, 3].map((i) => (
+@@ -70,7 +47,7 @@ export function EmailList({
+             </div>
+             <p className="max-w-[220px] text-[13.5px] font-medium leading-snug text-zinc-900">{emptyLabel}</p>
+             <p className="mt-1 max-w-[240px] text-[12.5px] leading-snug text-zinc-500">
+-              {query ? "Try a different search term." : "Compose your first email to get started."}
++              {query ? "Try a different search term." : "Nothing to show here yet."}
+             </p>
+           </div>
+         )}
+diff --git a/components/ProfileMenu.tsx b/components/ProfileMenu.tsx
+new file mode 100644
+index 0000000..b7636a8
+--- /dev/null
++++ b/components/ProfileMenu.tsx
+@@ -0,0 +1,248 @@
++"use client";
++
++import { useEffect, useRef, useState } from "react";
++import { Avatar } from "./Avatar";
++import { CheckIcon, ChevronDownIcon, MailIcon, PlusIcon } from "./icons";
++import { api } from "@/lib/api";
++import { toneFor } from "@/lib/avatars";
++import type { Mailbox, User } from "@/lib/types";
++import { formatCount } from "@/lib/types";
++
++/**
++ * Account button in the top bar. Hover (or click) opens a panel listing every
++ * email address assigned to the account; picking one switches the inbox.
++ */
++export function ProfileMenu({
++  user,
++  mailboxes,
++  activeId,
++  onSelect,
++  onAdded,
++  onOpen,
++  onLogout,
++}: {
++  user: User | null;
++  mailboxes: Mailbox[];
++  activeId: string | null;
++  onSelect: (mb: Mailbox) => void;
++  onAdded: (mb: Mailbox) => void;
++  onOpen: () => void;
++  onLogout: () => void;
++}) {
++  const [open, setOpen] = useState(false);
++  const [address, setAddress] = useState("");
++  const [adding, setAdding] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const wrapRef = useRef<HTMLDivElement>(null);
++  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++
++  const initial = user?.name?.[0]?.toUpperCase() || "U";
++  const totalUnread = mailboxes.reduce((n, m) => n + (m.unread ?? 0), 0);
++
++  function show() {
++    if (closeTimer.current) clearTimeout(closeTimer.current);
++    if (!open) {
++      setOpen(true);
++      onOpen();
++    }
++  }
++
++  function scheduleHide() {
++    if (closeTimer.current) clearTimeout(closeTimer.current);
++    // Small grace period so the pointer can cross the gap without flicker.
++    closeTimer.current = setTimeout(() => setOpen(false), 140);
++  }
++
++  useEffect(() => {
++    if (!open) return;
++    const onDown = (e: MouseEvent) => {
++      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
++    };
++    const onKey = (e: KeyboardEvent) => {
++      if (e.key === "Escape") setOpen(false);
++    };
++    document.addEventListener("mousedown", onDown);
++    document.addEventListener("keydown", onKey);
++    return () => {
++      document.removeEventListener("mousedown", onDown);
++      document.removeEventListener("keydown", onKey);
++    };
++  }, [open]);
++
++  useEffect(() => () => {
++    if (closeTimer.current) clearTimeout(closeTimer.current);
++  }, []);
++
++  async function addAddress(e: React.FormEvent) {
++    e.preventDefault();
++    const value = address.trim();
++    if (!value) return;
++    setAdding(true);
++    setError(null);
++    try {
++      const res = await api.addMailbox(value);
++      setAddress("");
++      onAdded({ ...res.mailbox, unread: 0 });
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "Could not add this address");
++    } finally {
++      setAdding(false);
++    }
++  }
++
++  return (
++    <div
++      ref={wrapRef}
++      className="relative"
++      onMouseEnter={show}
++      onMouseLeave={scheduleHide}
++    >
++      <button
++        type="button"
++        onClick={show}
++        aria-haspopup="menu"
++        aria-expanded={open}
++        className="group flex items-center gap-2.5 rounded-full border border-zinc-200 bg-white py-1 pl-1.5 pr-2.5 transition-[border-color,background-color] duration-300 hover:border-zinc-300 hover:bg-zinc-50"
++      >
++        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-[11px] font-medium text-white">
++          {initial}
++        </span>
++        <span className="hidden text-left sm:block">
++          <span className="block max-w-[140px] truncate text-[12.5px] font-medium leading-tight text-zinc-900">
++            {user?.name}
++          </span>
++          <span className="block max-w-[140px] truncate text-[10.5px] leading-tight text-zinc-500">
++            {mailboxes.find((m) => m.id === activeId)?.address ?? user?.email}
++          </span>
++        </span>
++        <ChevronDownIcon
++          size={14}
++          className={`hidden text-zinc-400 transition-transform duration-300 ease-[var(--ease-glide)] sm:block ${
++            open ? "rotate-180" : ""
++          }`}
++        />
++      </button>
++
++      <div
++        role="menu"
++        className={`celer-menu absolute right-0 top-full z-40 mt-2 w-[300px] rounded-2xl border border-zinc-200/80 bg-white p-2 shadow-[0_12px_40px_-8px_rgba(0,0,0,0.18)] ${
++          open ? "is-open" : ""
++        }`}
++      >
++        {/* Account header */}
++        <div className="flex items-center gap-3 rounded-xl bg-zinc-50 p-3">
++          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-[13px] font-medium text-white">
++            {initial}
++          </span>
++          <div className="min-w-0 flex-1">
++            <p className="truncate text-[13px] font-semibold text-zinc-900">{user?.name}</p>
++            <p className="truncate text-[11.5px] text-zinc-500">{user?.email}</p>
++          </div>
++        </div>
++
++        {/* Assigned addresses */}
++        <div className="mt-2 flex items-center justify-between px-2 pb-1 pt-1.5">
++          <span className="text-[10.5px] font-semibold uppercase tracking-wider text-zinc-400">
++            Email addresses
++          </span>
++          <span className="text-[10.5px] tabular-nums text-zinc-400">
++            {mailboxes.length} · {formatCount(totalUnread)} unread
++          </span>
++        </div>
++
++        <div className="celer-scroll max-h-[260px] space-y-0.5 overflow-y-auto">
++          {mailboxes.map((mb) => {
++            const active = mb.id === activeId;
++            return (
++              <button
++                key={mb.id}
++                type="button"
++                role="menuitemradio"
++                aria-checked={active}
++                onClick={() => {
++                  onSelect(mb);
++                  setOpen(false);
++                }}
++                className={`group flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors duration-200 ${
++                  active ? "bg-zinc-900 text-white" : "text-zinc-800 hover:bg-zinc-100"
++                }`}
++              >
++                <Avatar
++                  name={mb.name}
++                  email={mb.address}
++                  tone={toneFor(mb.address)}
++                  size={30}
++                />
++                <span className="min-w-0 flex-1">
++                  <span className="flex items-center gap-1.5">
++                    <span className="truncate text-[12.5px] font-medium">
++                      {mb.name || mb.address.split("@")[0]}
++                    </span>
++                    {mb.isPrimary && (
++                      <span
++                        className={`shrink-0 rounded px-1 py-px text-[9.5px] font-semibold uppercase tracking-wide ${
++                          active ? "bg-white/15 text-white/80" : "bg-zinc-100 text-zinc-500"
++                        }`}
++                      >
++                        Primary
++                      </span>
++                    )}
++                  </span>
++                  <span
++                    className={`block truncate text-[11.5px] ${
++                      active ? "text-white/70" : "text-zinc-500"
++                    }`}
++                  >
++                    {mb.address}
++                  </span>
++                </span>
++                {(mb.unread ?? 0) > 0 && !active && (
++                  <span className="shrink-0 rounded-full bg-zinc-900 px-1.5 py-0.5 text-[10.5px] font-medium tabular-nums text-white">
++                    {formatCount(mb.unread ?? 0)}
++                  </span>
++                )}
++                {active && <CheckIcon size={14} className="shrink-0" />}
++              </button>
++            );
++          })}
++        </div>
++
++        {/* Add an address */}
++        <form onSubmit={addAddress} className="mt-2 border-t border-zinc-100 pt-2">
++          <label className="flex h-9 items-center gap-2 rounded-xl bg-zinc-50 px-2.5 ring-1 ring-zinc-900/[0.04] transition-[box-shadow,background-color] duration-200 focus-within:bg-white focus-within:ring-zinc-900/15">
++            <MailIcon size={14} className="shrink-0 text-zinc-400" />
++            <input
++              type="email"
++              value={address}
++              onChange={(e) => {
++                setAddress(e.target.value);
++                if (error) setError(null);
++              }}
++              placeholder="Add another email address"
++              className="min-w-0 flex-1 bg-transparent text-[12.5px] text-zinc-900 outline-none placeholder:text-zinc-400"
++            />
++            <button
++              type="submit"
++              disabled={adding || !address.trim()}
++              aria-label="Add email address"
++              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-zinc-900 text-white transition-all duration-200 hover:bg-black disabled:opacity-30"
++            >
++              <PlusIcon size={13} strokeWidth={2.2} />
++            </button>
++          </label>
++          {error && <p className="mt-1.5 px-1 text-[11.5px] text-red-600">{error}</p>}
++        </form>
++
++        <div className="my-2 h-px bg-zinc-100" />
++
++        <button
++          type="button"
++          onClick={onLogout}
++          className="flex w-full items-center justify-center rounded-xl bg-zinc-900 py-2 text-[12.5px] font-medium text-white transition-colors duration-200 hover:bg-black"
++        >
++          Sign out
++        </button>
++      </div>
++    </div>
++  );
++}
+diff --git a/components/ReadingPane.tsx b/components/ReadingPane.tsx
+index e0f0339..43e5000 100644
+--- a/components/ReadingPane.tsx
++++ b/components/ReadingPane.tsx
+@@ -9,62 +9,60 @@ import {
+   PaperclipIcon,
+   MailOpenIcon,
+   CloseIcon,
++  PencilIcon,
++  RestoreIcon,
+ } from "./icons";
++import type { IconType } from "./icons";
+ import { formatDate, type Email } from "@/lib/types";
+ 
+-function ActionButton({
++/** Icon-only action on the right-hand rail. The label shows as a tooltip on hover. */
++function RailButton({
+   label,
+   onClick,
++  active,
+   danger,
+-  children,
++  primary,
++  Icon,
++  iconProps,
+ }: {
+   label: string;
+   onClick: () => void;
++  active?: boolean;
+   danger?: boolean;
+-  children: React.ReactNode;
++  primary?: boolean;
++  Icon: IconType;
++  iconProps?: { fill?: string; strokeWidth?: number };
+ }) {
++  const tone = primary
++    ? "bg-zinc-900 text-white shadow-sm hover:bg-black"
++    : active
++      ? "bg-amber-50 text-amber-500 ring-1 ring-amber-200 hover:bg-amber-100"
++      : danger
++        ? "text-zinc-500 hover:bg-red-50 hover:text-red-600"
++        : "text-zinc-500 hover:bg-zinc-900/[0.06] hover:text-zinc-900";
++
+   return (
+-    <button
+-      onClick={onClick}
+-      title={label}
+-      aria-label={label}
+-      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-[12.5px] font-medium transition-colors ${
+-        danger
+-          ? "border-zinc-200 bg-white text-zinc-600 hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+-          : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900"
+-      }`}
+-    >
+-      {children}
+-      <span className="hidden sm:inline">{label}</span>
+-    </button>
++    <div className="group relative">
++      <button
++        type="button"
++        onClick={onClick}
++        aria-label={label}
++        className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors duration-200 ${tone}`}
++      >
++        <Icon size={17} strokeWidth={primary ? 2 : 1.7} {...iconProps} />
++      </button>
++      <span
++        role="tooltip"
++        className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 -translate-y-1/2 translate-x-1 whitespace-nowrap rounded-md bg-zinc-900 px-2 py-1 text-[11.5px] font-medium text-white opacity-0 shadow-md transition-[opacity,transform] duration-200 ease-out group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100"
++      >
++        {label}
++      </span>
++    </div>
+   );
+ }
+ 
+-function IconButton({
+-  label,
+-  onClick,
+-  active,
+-  children,
+-}: {
+-  label: string;
+-  onClick: () => void;
+-  active?: boolean;
+-  children: React.ReactNode;
+-}) {
+-  return (
+-    <button
+-      onClick={onClick}
+-      title={label}
+-      aria-label={label}
+-      className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
+-        active
+-          ? "border-amber-200 bg-amber-50 text-amber-500"
+-          : "border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900"
+-      }`}
+-    >
+-      {children}
+-    </button>
+-  );
++function RailDivider() {
++  return <div className="my-1 h-px w-6 bg-zinc-200" />;
+ }
+ 
+ function bytes(n?: number | null) {
+@@ -84,7 +82,7 @@ export function ReadingPane({
+   onToggleStar,
+   onMarkUnread,
+ }: {
+-  email: Email | null;
++  email: Email;
+   onClose: () => void;
+   onArchive: (e: Email) => void;
+   onTrash: (e: Email) => void;
+@@ -93,20 +91,6 @@ export function ReadingPane({
+   onToggleStar: (e: Email) => void;
+   onMarkUnread: (e: Email) => void;
+ }) {
+-  if (!email) {
+-    return (
+-      <section className="hidden min-w-0 flex-1 flex-col items-center justify-center bg-[#fcfcfa] px-8 md:flex">
+-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white ring-1 ring-zinc-900/5">
+-          <MailOpenIcon size={20} className="text-zinc-400" />
+-        </div>
+-        <p className="mt-4 text-[14px] font-medium text-zinc-900">Select an email</p>
+-        <p className="mt-1 max-w-[260px] text-center text-[13px] leading-snug text-zinc-500">
+-          Choose an email from the list to read it here.
+-        </p>
+-      </section>
+-    );
+-  }
+-
+   const isTrash = email.folder === "TRASH";
+   const isDraft = email.folder === "DRAFT";
+   const isSent = email.folder === "SENT";
+@@ -114,155 +98,152 @@ export function ReadingPane({
+   const counterpartName = isSent || isDraft ? email.to.join(", ") : email.fromName ?? email.fromEmail;
+ 
+   return (
+-    <section className="celer-scroll flex min-h-0 flex-1 flex-col overflow-y-auto bg-white">
+-      {/* Top bar with close */}
+-      <div className="sticky top-0 z-10 flex h-12 shrink-0 items-center justify-between border-b border-zinc-200 bg-white/80 px-3 backdrop-blur">
+-        <div className="flex items-center gap-1.5">
++    <section className="flex h-full min-w-0 flex-1 bg-white">
++      <div className="flex min-w-0 flex-1 flex-col">
++        {/* Top bar: close only */}
++        <div className="flex h-12 shrink-0 items-center border-b border-zinc-200 bg-white/80 px-3 backdrop-blur">
+           <button
++            type="button"
+             onClick={onClose}
+-            className="inline-flex h-7 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 text-[12.5px] font-medium text-zinc-700 hover:bg-zinc-50"
++            className="inline-flex h-7 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 text-[12.5px] font-medium text-zinc-700 transition-colors duration-200 hover:bg-zinc-50"
+           >
+             <CloseIcon size={14} />
+             Close
+           </button>
+-          <div className="ml-2 h-4 w-px bg-zinc-200" />
+-          <div className="flex items-center gap-1">
+-            {isTrash ? (
+-              <>
+-                <ActionButton label="Restore" onClick={() => onRestore(email)}>
+-                  <MailOpenIcon size={14} />
+-                </ActionButton>
+-                <ActionButton label="Delete forever" onClick={() => onTrash(email)} danger>
+-                  <TrashIcon size={14} />
+-                </ActionButton>
+-              </>
+-            ) : (
+-              <>
+-                <ActionButton label="Archive" onClick={() => onArchive(email)}>
+-                  <ArchiveIcon size={14} />
+-                </ActionButton>
+-                <ActionButton label="Trash" onClick={() => onTrash(email)} danger>
+-                  <TrashIcon size={14} />
+-                </ActionButton>
+-                <ActionButton label="Unread" onClick={() => onMarkUnread(email)}>
+-                  <MailOpenIcon size={14} />
+-                </ActionButton>
+-                <ActionButton label={isDraft ? "Edit" : "Reply"} onClick={() => onReply(email)}>
+-                  <MailReplyIcon size={14} />
+-                </ActionButton>
+-              </>
+-            )}
+-          </div>
+         </div>
+ 
+-        <IconButton label="Star" onClick={() => onToggleStar(email)} active={email.isStarred}>
+-          <StarIcon size={16} fill={email.isStarred ? "currentColor" : "none"} />
+-        </IconButton>
+-      </div>
+-
+-      <div className="mx-auto w-full max-w-[720px] px-6 py-5 sm:px-8">
+-        {/* Sender */}
+-        <div className="flex items-start gap-3.5">
+-          <Avatar
+-            name={isSent || isDraft ? null : email.fromName}
+-            email={counterpart || email.fromEmail}
+-            url={email.avatarUrl}
+-            tone={email.avatarTone}
+-            size={40}
+-          />
+-          <div className="min-w-0 flex-1">
+-            <div className="flex items-baseline gap-2">
+-              <span className="truncate text-[15px] font-semibold tracking-tight text-zinc-900">
+-                {counterpartName}
+-              </span>
+-              <span className="hidden text-[12px] text-zinc-500 sm:block">
+-                {formatDate(email.receivedAt)}
+-              </span>
+-            </div>
+-            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12.5px] text-zinc-500">
+-              <span className="rounded bg-zinc-50 px-1.5 py-0.5 ring-1 ring-zinc-900/5">
+-                {isSent || isDraft ? "To" : "From"}: {counterpart}
+-              </span>
+-              {email.cc.length > 0 && (
+-                <span className="rounded bg-zinc-50 px-1.5 py-0.5 ring-1 ring-zinc-900/5">
+-                  Cc: {email.cc.join(", ")}
+-                </span>
+-              )}
++        {/* Body. Keyed by id so switching emails fades the new one in. */}
++        <div key={email.id} className="celer-scroll celer-enter min-h-0 flex-1 overflow-y-auto">
++          <div className="mx-auto w-full max-w-[720px] px-6 py-5 sm:px-8">
++            {/* Sender */}
++            <div className="flex items-start gap-3.5">
++              <Avatar
++                name={isSent || isDraft ? null : email.fromName}
++                email={counterpart || email.fromEmail}
++                url={email.avatarUrl}
++                tone={email.avatarTone}
++                size={40}
++              />
++              <div className="min-w-0 flex-1">
++                <div className="flex items-baseline gap-2">
++                  <span className="truncate text-[15px] font-semibold tracking-tight text-zinc-900">
++                    {counterpartName}
++                  </span>
++                  <span className="hidden text-[12px] text-zinc-500 sm:block">
++                    {formatDate(email.receivedAt)}
++                  </span>
++                </div>
++                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12.5px] text-zinc-500">
++                  <span className="rounded bg-zinc-50 px-1.5 py-0.5 ring-1 ring-zinc-900/5">
++                    {isSent || isDraft ? "To" : "From"}: {counterpart}
++                  </span>
++                  {email.cc.length > 0 && (
++                    <span className="rounded bg-zinc-50 px-1.5 py-0.5 ring-1 ring-zinc-900/5">
++                      Cc: {email.cc.join(", ")}
++                    </span>
++                  )}
++                </div>
++              </div>
+             </div>
+-          </div>
+-        </div>
+ 
+-        <h1 className="mt-6 text-[22px] font-semibold leading-[1.25] tracking-tight text-zinc-900">
+-          {email.subject || "(no subject)"}
+-        </h1>
+-
+-        {isDraft && (
+-          <div className="mt-4 rounded-lg border border-dashed border-amber-200 bg-amber-50/50 px-3 py-2 text-[12.5px] text-amber-800">
+-            Draft — click Reply to edit and send.
+-          </div>
+-        )}
++            <h1 className="mt-6 text-[22px] font-semibold leading-[1.25] tracking-tight text-zinc-900">
++              {email.subject || "(no subject)"}
++            </h1>
+ 
+-        <div className="prose prose-zinc mt-6 max-w-none">
+-          <div className="space-y-4 text-[14px] leading-[1.7] text-zinc-700">
+-            {(email.text ?? "")
+-              .split("\n")
+-              .filter((l) => l.trim().length > 0)
+-              .map((para, i) => (
+-                <p key={i} className="whitespace-pre-wrap">
+-                  {para}
+-                </p>
+-              ))}
+-            {!(email.text ?? "").trim() && email.html && (
+-              <div className="prose-sm" dangerouslySetInnerHTML={{ __html: email.html }} />
++            {isDraft && (
++              <div className="mt-4 rounded-lg border border-dashed border-amber-200 bg-amber-50/50 px-3 py-2 text-[12.5px] text-amber-800">
++                Draft — use the edit button on the right to finish and send it.
++              </div>
+             )}
+-          </div>
+-        </div>
+ 
+-        {email.attachments.length > 0 && (
+-          <div className="mt-8 border-t border-zinc-100 pt-6">
+-            <div className="flex items-center gap-2">
+-              <PaperclipIcon size={14} className="text-zinc-400" />
+-              <span className="text-[12.5px] font-medium text-zinc-700">
+-                {email.attachments.length} attachment{email.attachments.length > 1 ? "s" : ""}
+-              </span>
++            <div className="prose prose-zinc mt-6 max-w-none">
++              <div className="space-y-4 text-[14px] leading-[1.7] text-zinc-700">
++                {(email.text ?? "")
++                  .split("\n")
++                  .filter((l) => l.trim().length > 0)
++                  .map((para, i) => (
++                    <p key={i} className="whitespace-pre-wrap">
++                      {para}
++                    </p>
++                  ))}
++                {!(email.text ?? "").trim() && email.html && (
++                  <div className="prose-sm" dangerouslySetInnerHTML={{ __html: email.html }} />
++                )}
++              </div>
+             </div>
+-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+-              {email.attachments.map((a, i) => (
+-                <div
+-                  key={i}
+-                  className="group flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 transition-colors hover:border-zinc-300 hover:bg-zinc-50"
+-                >
+-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-white">
+-                    <span className="text-[11px] font-medium">
+-                      {a.name.split(".").pop()?.slice(0, 3).toUpperCase() || "FILE"}
+-                    </span>
+-                  </div>
+-                  <div className="min-w-0 flex-1">
+-                    <p className="truncate text-[12.5px] font-medium text-zinc-900">{a.name}</p>
+-                    {a.size ? <p className="text-[11px] text-zinc-500">{bytes(a.size)}</p> : null}
+-                  </div>
++
++            {email.attachments.length > 0 && (
++              <div className="mt-8 border-t border-zinc-100 pt-6">
++                <div className="flex items-center gap-2">
++                  <PaperclipIcon size={14} className="text-zinc-400" />
++                  <span className="text-[12.5px] font-medium text-zinc-700">
++                    {email.attachments.length} attachment{email.attachments.length > 1 ? "s" : ""}
++                  </span>
+                 </div>
+-              ))}
+-            </div>
++                <div className="mt-3 grid gap-2 sm:grid-cols-2">
++                  {email.attachments.map((a, i) => (
++                    <div
++                      key={i}
++                      className="group flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 transition-colors duration-200 hover:border-zinc-300 hover:bg-zinc-50"
++                    >
++                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-white">
++                        <span className="text-[11px] font-medium">
++                          {a.name.split(".").pop()?.slice(0, 3).toUpperCase() || "FILE"}
++                        </span>
++                      </div>
++                      <div className="min-w-0 flex-1">
++                        <p className="truncate text-[12.5px] font-medium text-zinc-900">{a.name}</p>
++                        {a.size ? <p className="text-[11px] text-zinc-500">{bytes(a.size)}</p> : null}
++                      </div>
++                    </div>
++                  ))}
++                </div>
++              </div>
++            )}
+           </div>
+-        )}
+-
+-        <div className="mt-10 flex items-center gap-2 border-t border-zinc-100 pt-6">
+-          <button
+-            onClick={() => onReply(email)}
+-            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-[12.5px] font-medium text-white hover:bg-black"
+-          >
+-            <MailReplyIcon size={14} />
+-            Reply
+-          </button>
+-          <button
+-            onClick={onClose}
+-            className="inline-flex h-8 items-center rounded-lg border border-zinc-200 bg-white px-3 text-[12.5px] font-medium text-zinc-700 hover:bg-zinc-50"
+-          >
+-            Close
+-          </button>
+         </div>
+       </div>
++
++      {/* Vertical action rail on the right. Icons only; labels appear on hover. */}
++      <aside
++        aria-label="Email actions"
++        className="flex w-14 shrink-0 flex-col items-center gap-1.5 border-l border-zinc-200 bg-[#fcfcfa] py-3"
++      >
++        {isTrash ? (
++          <RailButton label="Restore" Icon={RestoreIcon} onClick={() => onRestore(email)} />
++        ) : (
++          <RailButton
++            label={isDraft ? "Edit draft" : "Reply"}
++            Icon={isDraft ? PencilIcon : MailReplyIcon}
++            primary
++            onClick={() => onReply(email)}
++          />
++        )}
++
++        <RailButton
++          label={email.isStarred ? "Unstar" : "Star"}
++          Icon={StarIcon}
++          active={email.isStarred}
++          iconProps={{ fill: email.isStarred ? "currentColor" : "none" }}
++          onClick={() => onToggleStar(email)}
++        />
++
++        {!isTrash && (
++          <>
++            <RailButton label="Mark as unread" Icon={MailOpenIcon} onClick={() => onMarkUnread(email)} />
++            <RailDivider />
++            <RailButton label="Archive" Icon={ArchiveIcon} onClick={() => onArchive(email)} />
++          </>
++        )}
++
++        <RailDivider />
++
++        {isTrash ? (
++          <RailButton label="Delete forever" Icon={TrashIcon} danger onClick={() => onTrash(email)} />
++        ) : (
++          <RailButton label="Move to trash" Icon={TrashIcon} danger onClick={() => onTrash(email)} />
++        )}
++      </aside>
+     </section>
+   );
+ }
+diff --git a/components/Segmented.tsx b/components/Segmented.tsx
+new file mode 100644
+index 0000000..78259d1
+--- /dev/null
++++ b/components/Segmented.tsx
+@@ -0,0 +1,80 @@
++"use client";
++
++import { useLayoutEffect, useRef, useState } from "react";
++import type { IconType } from "./icons";
++
++export type SegmentItem<T extends string> = {
++  key: T;
++  label: string;
++  Icon: IconType;
++  count?: number;
++};
++
++/**
++ * Pill segmented control with a thumb that glides between the active items.
++ */
++export function Segmented<T extends string>({
++  items,
++  value,
++  onChange,
++}: {
++  items: SegmentItem<T>[];
++  value: T;
++  onChange: (key: T) => void;
++}) {
++  const refs = useRef<Partial<Record<T, HTMLButtonElement | null>>>({});
++  const [thumb, setThumb] = useState<{ x: number; w: number } | null>(null);
++
++  const layoutKey = items.map((i) => i.key).join("|");
++
++  useLayoutEffect(() => {
++    const measure = () => {
++      const el = refs.current[value];
++      if (el) setThumb({ x: el.offsetLeft, w: el.offsetWidth });
++    };
++    measure();
++    window.addEventListener("resize", measure);
++    return () => window.removeEventListener("resize", measure);
++  }, [value, layoutKey]);
++
++  return (
++    <div className="relative flex items-center gap-0.5 rounded-lg bg-zinc-100 p-0.5">
++      {thumb && (
++        <span
++          aria-hidden
++          className="celer-thumb absolute bottom-0.5 top-0.5 left-0 rounded-md bg-white shadow-sm ring-1 ring-zinc-900/5"
++          style={{ width: thumb.w, transform: `translate3d(${thumb.x}px,0,0)` }}
++        />
++      )}
++      {items.map(({ key, label, Icon, count }) => {
++        const active = key === value;
++        return (
++          <button
++            key={key}
++            ref={(el) => {
++              refs.current[key] = el;
++            }}
++            type="button"
++            onClick={() => onChange(key)}
++            aria-pressed={active}
++            className={`relative z-10 inline-flex h-6 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-medium transition-colors duration-300 ${
++              active ? "text-zinc-900" : "text-zinc-500 hover:text-zinc-800"
++            }`}
++          >
++            <Icon size={13} strokeWidth={active ? 2 : 1.6} />
++            {label}
++            {count !== undefined && count > 0 && (
++              <span
++                className={`ml-0.5 tabular-nums text-[11px] transition-colors duration-300 ${
++                  active ? "text-zinc-500" : "text-zinc-400"
++                }`}
++              >
++                {count}
++              </span>
++            )}
++          </button>
++        );
++      })}
++    </div>
++  );
++}
+diff --git a/components/Sidebar.tsx b/components/Sidebar.tsx
+index 15fccdf..20e7259 100644
+--- a/components/Sidebar.tsx
++++ b/components/Sidebar.tsx
+@@ -1,6 +1,6 @@
+ "use client";
+ 
+-import { CelerMark } from "./CelerLogo";
++import { CelerBar } from "./CelerLogo";
+ import {
+   InboxPlusIcon,
+   StarIcon,
+@@ -59,11 +59,9 @@ export function Sidebar({
+ 
+   return (
+     <nav className="flex w-[64px] shrink-0 flex-col items-center border-r border-line bg-[#fbfbfa] py-4">
+-      {/* Logo - consistent CelerMark as login page */}
+-      <div className="mb-6 flex flex-col items-center">
+-        <div className="mt-1.5">
+-          <CelerMark size={18} />
+-        </div>
++      {/* Logo: the gradient bar only */}
++      <div className="mb-6 flex h-9 items-center justify-center">
++        <CelerBar size={26} />
+       </div>
+ 
+       {/* Main nav */}
+@@ -78,7 +76,7 @@ export function Sidebar({
+               aria-label={label}
+               aria-current={active ? "page" : undefined}
+               onClick={() => onView(key)}
+-              className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition-all ${
++              className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition-[background-color,color,box-shadow] duration-300 ${
+                 active
+                   ? "bg-[#18181b] text-white shadow-sm"
+                   : "text-zinc-500 hover:bg-zinc-900/[0.06] hover:text-zinc-900"
+diff --git a/components/icons.tsx b/components/icons.tsx
+index e4b4291..6517198 100644
+--- a/components/icons.tsx
++++ b/components/icons.tsx
+@@ -167,3 +167,30 @@ export const SearchIcon = (p: IconProps) => (
+     <path d="m15.5 15.5 3.5 3.5" />
+   </svg>
+ );
++
++export const RestoreIcon = (p: IconProps) => (
++  <svg {...base(p)}>
++    <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
++    <path d="M3.5 4.5v4h4" />
++  </svg>
++);
++
++export const PencilIcon = (p: IconProps) => (
++  <svg {...base(p)}>
++    <path d="M4 20h4L19 9l-4-4L4 16v4Z" />
++    <path d="m13.5 6.5 4 4" />
++  </svg>
++);
++
++export const PlusIcon = (p: IconProps) => (
++  <svg {...base(p)}>
++    <path d="M12 5v14M5 12h14" />
++  </svg>
++);
++
++export const MailIcon = (p: IconProps) => (
++  <svg {...base(p)}>
++    <rect x="3" y="5" width="18" height="14" rx="2" />
++    <path d="m3.5 6.5 8.5 6.5 8.5-6.5" />
++  </svg>
++);
+diff --git a/lib/api.ts b/lib/api.ts
+index 54bbc8b..9c48e3c 100644
+--- a/lib/api.ts
++++ b/lib/api.ts
+@@ -1,4 +1,4 @@
+-import type { Counts, Email, Folder, User } from "./types";
++import type { Counts, Email, Folder, Mailbox, User } from "./types";
+ 
+ // All requests go to /api/* which Next.js proxies to the Express backend.
+ // Cookies (session) are sent automatically (same-origin).
+@@ -41,13 +41,23 @@ export const api = {
+ 
+   logout: () => request<{ success: boolean }>("/api/auth/logout", { method: "POST" }),
+ 
++  listMailboxes: () => request<{ success: boolean; mailboxes: Mailbox[] }>("/api/mailboxes"),
++
++  addMailbox: (address: string, name?: string) =>
++    request<{ success: boolean; mailbox: Mailbox }>("/api/mailboxes", {
++      method: "POST",
++      body: JSON.stringify({ address, name }),
++    }),
++
+   listEmails: (params: {
+     folder?: Folder | "ALL";
+     q?: string;
+     starred?: boolean;
+     unread?: boolean;
++    mailboxId?: string | null;
+   }) => {
+     const qs = new URLSearchParams();
++    if (params.mailboxId) qs.set("mailbox", params.mailboxId);
+     if (params.folder && params.folder !== "ALL") qs.set("folder", params.folder);
+     if (params.folder === "ALL") qs.set("all", "true");
+     if (params.q) qs.set("q", params.q);
+@@ -55,6 +65,7 @@ export const api = {
+     if (params.unread) qs.set("unread", "true");
+     return request<{
+       success: boolean;
++      mailbox: Mailbox;
+       emails: Email[];
+       counts: Counts;
+       unread?: number;
+@@ -74,13 +85,13 @@ export const api = {
+       { method: "DELETE" },
+     ),
+ 
+-  sendEmail: (payload: { to: string[]; subject: string; text: string }) =>
++  sendEmail: (payload: { to: string[]; subject: string; text: string; mailboxId?: string | null }) =>
+     request<{ success: boolean; email: Email; demo?: boolean; message?: string }>(
+       "/api/send-email",
+       { method: "POST", body: JSON.stringify(payload) },
+     ),
+ 
+-  createDraft: (payload: { to?: string[]; subject?: string; text?: string }) =>
++  createDraft: (payload: { to?: string[]; subject?: string; text?: string; mailboxId?: string | null }) =>
+     request<{ success: boolean; email: Email }>("/api/emails/drafts", {
+       method: "POST",
+       body: JSON.stringify(payload),
+diff --git a/lib/mailbox.ts b/lib/mailbox.ts
+new file mode 100644
+index 0000000..29c9b7f
+--- /dev/null
++++ b/lib/mailbox.ts
+@@ -0,0 +1,50 @@
++import { prisma } from "@/lib/prisma";
++
++export type AuthUser = { id: string; email: string; name: string };
++
++/**
++ * Make sure the user always has a primary mailbox for their login address.
++ * Covers accounts created before mailboxes existed.
++ */
++export async function ensurePrimaryMailbox(user: AuthUser) {
++  const existing = await prisma.mailbox.findFirst({
++    where: { userId: user.id, isPrimary: true },
++  });
++  if (existing) return existing;
++
++  // The address may already exist (e.g. a stale row); reuse it if it belongs to this user.
++  const byAddress = await prisma.mailbox.findUnique({ where: { address: user.email } });
++  if (byAddress && byAddress.userId === user.id) {
++    return prisma.mailbox.update({ where: { id: byAddress.id }, data: { isPrimary: true } });
++  }
++
++  return prisma.mailbox.create({
++    data: { userId: user.id, address: user.email, name: user.name, isPrimary: true },
++  });
++}
++
++/**
++ * Resolve the mailbox to act on: the requested one if it belongs to the user,
++ * otherwise the user's primary mailbox.
++ */
++export async function resolveMailbox(user: AuthUser, mailboxId?: string | null) {
++  if (mailboxId) {
++    const mb = await prisma.mailbox.findFirst({ where: { id: mailboxId, userId: user.id } });
++    if (mb) return mb;
++  }
++  return ensurePrimaryMailbox(user);
++}
++
++export function serializeMailbox(mb: {
++  id: string;
++  address: string;
++  name: string | null;
++  isPrimary: boolean;
++}) {
++  return {
++    id: mb.id,
++    address: mb.address,
++    name: mb.name,
++    isPrimary: mb.isPrimary,
++  };
++}
+diff --git a/lib/serialize.ts b/lib/serialize.ts
+index e1b0b6c..a8ca357 100644
+--- a/lib/serialize.ts
++++ b/lib/serialize.ts
+@@ -40,5 +40,6 @@ export function serializeEmail(row: any) {
+     createdAt: row.createdAt,
+     updatedAt: row.updatedAt,
+     userId: row.userId,
++    mailboxId: row.mailboxId ?? null,
+   };
+ }
+diff --git a/lib/types.ts b/lib/types.ts
+index 9542537..6a9fb10 100644
+--- a/lib/types.ts
++++ b/lib/types.ts
+@@ -25,11 +25,20 @@ export interface Email {
+   isStarred: boolean;
+   receivedAt: string;
+   createdAt?: string;
++  mailboxId?: string | null;
+   // UI-only
+   avatarUrl?: string;
+   avatarTone?: { bg: string; fg: string; label?: string };
+ }
+ 
++export interface Mailbox {
++  id: string;
++  address: string;
++  name: string | null;
++  isPrimary: boolean;
++  unread?: number;
++}
++
+ export interface User {
+   id: string;
+   email: string;
+diff --git a/lib/validations/email.ts b/lib/validations/email.ts
+index 2feb071..c2e177e 100644
+--- a/lib/validations/email.ts
++++ b/lib/validations/email.ts
+@@ -2,6 +2,7 @@ import { z } from "zod";
+ 
+ // Zod v4 uses z.email() and z.string().min etc - keep compatible
+ export const sendEmailSchema = z.object({
++  mailboxId: z.string().optional(),
+   to: z.union([z.email(), z.array(z.email()).min(1)]),
+   cc: z.array(z.email()).optional(),
+   bcc: z.array(z.email()).optional(),
+@@ -20,6 +21,7 @@ export const sendEmailSchema = z.object({
+ });
+ 
+ export const draftSchema = z.object({
++  mailboxId: z.string().optional(),
+   to: z.array(z.email()).optional().default([]),
+   cc: z.array(z.email()).optional().default([]),
+   bcc: z.array(z.email()).optional().default([]),
+diff --git a/prisma/migrations/20261008090000_mailboxes/migration.sql b/prisma/migrations/20261008090000_mailboxes/migration.sql
+new file mode 100644
+index 0000000..4600af6
+--- /dev/null
++++ b/prisma/migrations/20261008090000_mailboxes/migration.sql
+@@ -0,0 +1,40 @@
++-- CreateTable
++CREATE TABLE "Mailbox" (
++    "id" TEXT NOT NULL,
++    "address" TEXT NOT NULL,
++    "name" TEXT,
++    "isPrimary" BOOLEAN NOT NULL DEFAULT false,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "userId" TEXT NOT NULL,
++
++    CONSTRAINT "Mailbox_pkey" PRIMARY KEY ("id")
++);
++
++-- AlterTable
++ALTER TABLE "Email" ADD COLUMN "mailboxId" TEXT;
++
++-- CreateIndex
++CREATE UNIQUE INDEX "Mailbox_address_key" ON "Mailbox"("address");
++
++-- CreateIndex
++CREATE INDEX "Mailbox_userId_idx" ON "Mailbox"("userId");
++
++-- CreateIndex
++CREATE INDEX "Email_mailboxId_idx" ON "Email"("mailboxId");
++
++-- AddForeignKey
++ALTER TABLE "Mailbox" ADD CONSTRAINT "Mailbox_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "Email" ADD CONSTRAINT "Email_mailboxId_fkey" FOREIGN KEY ("mailboxId") REFERENCES "Mailbox"("id") ON DELETE SET NULL ON UPDATE CASCADE;
++
++-- Backfill: every existing user gets a primary mailbox for their login address,
++-- and all of their existing emails are attached to it.
++INSERT INTO "Mailbox" ("id", "address", "name", "isPrimary", "userId")
++SELECT gen_random_uuid()::text, u."email", u."name", true, u."id"
++FROM "User" u;
++
++UPDATE "Email" e
++SET "mailboxId" = m."id"
++FROM "Mailbox" m
++WHERE m."userId" = e."userId" AND m."isPrimary" = true AND e."mailboxId" IS NULL;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index b599ee1..b960ac0 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -25,8 +25,25 @@ model User {
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+ 
+-  emails   Email[]
+-  sessions Session[]
++  emails    Email[]
++  sessions  Session[]
++  mailboxes Mailbox[]
++}
++
++// An email address the user can read/send from. Each user has one primary
++// mailbox (their login address) plus any extra addresses they add.
++model Mailbox {
++  id        String   @id @default(uuid())
++  address   String   @unique
++  name      String?
++  isPrimary Boolean  @default(false)
++  createdAt DateTime @default(now())
++
++  userId String
++  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
++  emails Email[]
++
++  @@index([userId])
+ }
+ 
+ model Session {
+@@ -79,7 +96,12 @@ model Email {
+   userId String
+   user   User @relation(fields: [userId],    references: [id],onDelete: Cascade  )
+ 
++  // Mailbox (address) this email belongs to
++  mailboxId String?
++  mailbox   Mailbox? @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
++
+   @@index([userId])
++  @@index([mailboxId])
+   @@index([folder])
+   @@index([receivedAt])
+   @@index([fromEmail])
+diff --git a/prisma/seed.ts b/prisma/seed.ts
+index d75314e..1f36546 100644
+--- a/prisma/seed.ts
++++ b/prisma/seed.ts
+@@ -15,6 +15,18 @@ async function main() {
+ 
+   console.log(`Seed user: ${email} / ${password}`);
+ 
++  // Mailboxes = the email addresses assigned to this account.
++  const primary = await prisma.mailbox.upsert({
++    where: { address: email },
++    update: { isPrimary: true, userId: user.id },
++    create: { address: email, name: "Demo User", isPrimary: true, userId: user.id },
++  });
++  const work = await prisma.mailbox.upsert({
++    where: { address: "work@celer.app" },
++    update: { userId: user.id },
++    create: { address: "work@celer.app", name: "Work", isPrimary: false, userId: user.id },
++  });
++
+   // Clean prior seed mail for this user (keep it idempotent).
+   await prisma.email.deleteMany({ where: { userId: user.id } });
+ 
+@@ -76,6 +88,7 @@ async function main() {
+     await prisma.email.create({
+       data: {
+         userId: user.id,
++        mailboxId: primary.id,
+         fromEmail: r.fromEmail,
+         fromName: r.fromName,
+         to: JSON.stringify([email]),
+@@ -84,7 +97,7 @@ async function main() {
+         subject: r.subject,
+         text: r.text,
+         attachments: JSON.stringify(r.attachments),
+-        folder: r.folder,
++        folder: r.folder as "INBOX",
+         isRead: r.isRead,
+         isStarred: r.isStarred,
+         receivedAt: r.receivedAt,
+@@ -96,6 +109,7 @@ async function main() {
+   await prisma.email.create({
+     data: {
+       userId: user.id,
++      mailboxId: primary.id,
+       fromEmail: email,
+       fromName: "Demo User",
+       to: JSON.stringify(["rico.oktananda1@gmail.com"]),
+@@ -110,7 +124,65 @@ async function main() {
+     },
+   });
+ 
+-  console.log(`Seeded ${rows.length + 1} emails.`);
++  // A second address with its own inbox, sent and draft mail.
++  const workRows = [
++    {
++      fromEmail: "hello@figma.com",
++      fromName: "Figma",
++      subject: "Your team's files were updated",
++      text: "Three files in your Work team changed this week. Open Figma to review the latest comments and version history.",
++      folder: "INBOX" as const,
++      isRead: false,
++      receivedAt: new Date("2026-06-29T12:00:00Z"),
++    },
++    {
++      fromEmail: "billing@notion.so",
++      fromName: "Notion",
++      subject: "Your invoice is ready",
++      text: "Your monthly invoice for the Work workspace is ready to download from the billing page.",
++      folder: "INBOX" as const,
++      isRead: true,
++      receivedAt: new Date("2026-06-27T08:20:00Z"),
++    },
++  ];
++  for (const r of workRows) {
++    await prisma.email.create({
++      data: {
++        userId: user.id,
++        mailboxId: work.id,
++        fromEmail: r.fromEmail,
++        fromName: r.fromName,
++        to: JSON.stringify([work.address]),
++        cc: "[]",
++        bcc: "[]",
++        subject: r.subject,
++        text: r.text,
++        attachments: "[]",
++        folder: r.folder,
++        isRead: r.isRead,
++        receivedAt: r.receivedAt,
++      },
++    });
++  }
++  await prisma.email.create({
++    data: {
++      userId: user.id,
++      mailboxId: work.id,
++      fromEmail: work.address,
++      fromName: "Work",
++      to: JSON.stringify(["hello@figma.com"]),
++      cc: "[]",
++      bcc: "[]",
++      subject: "Re: Your team's files were updated",
++      text: "Thanks — I'll review the comments on the onboarding flow today.",
++      attachments: "[]",
++      folder: "SENT",
++      isRead: true,
++      receivedAt: new Date("2026-06-29T14:00:00Z"),
++    },
++  });
++
++  console.log(`Seeded ${rows.length + 1 + workRows.length + 1} emails across 2 mailboxes.`);
+ }
+ 
+ main()

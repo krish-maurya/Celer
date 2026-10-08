@@ -7,11 +7,9 @@ const poppins = Poppins({
 
 /**
  * Celer wordmark — a red-orange gradient bar to the left of the word "celer".
- * Faithful port of the supplied standalone HTML/CSS logo.
+ * Used on the login page.
  *
  * size = font size of the wordmark in px; the bar scales relative to it.
- * tone = "dark" renders the dark rounded tile with the white bar (as used for
- *        the active product switcher in the rail).
  */
 export function CelerMark({
   size = 20,
@@ -26,18 +24,7 @@ export function CelerMark({
       className="inline-flex select-none items-center"
       style={{ gap: size * 0.19 }}
     >
-      <span
-        aria-hidden
-        style={{
-          // Faithful to the supplied logo: a long thick horizontal bar (0.9em × 0.16em)
-          width: size * 0.62,
-          height: size * 0.15,
-          marginTop: size * 0.18,
-          borderRadius: Math.max(2, size * 0.04),
-          background: "linear-gradient(90deg, var(--brand-start), var(--brand-end))",
-          flexShrink: 0,
-        }}
-      />
+      <CelerBar size={size} />
       <span
         className={poppins.className}
         style={{
@@ -54,21 +41,22 @@ export function CelerMark({
   );
 }
 
-/** The filled dark rounded tile from the rail, containing just the gradient bar. */
-export function CelerTile() {
+/**
+ * The gradient bar on its own — the exact bar from the wordmark, with no text.
+ * Same gradient and proportions as the logo bar (size = wordmark font size).
+ */
+export function CelerBar({ size = 20, className }: { size?: number; className?: string }) {
   return (
     <span
-      aria-hidden
-      className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#1f1f1f]"
-    >
-      <span
-        style={{
-          width: 21,
-          height: 12,
-          borderRadius: 3,
-          background: "linear-gradient(90deg, var(--brand-start), var(--brand-end))",
-        }}
-      />
-    </span>
+      aria-label="Celer"
+      role="img"
+      className={`inline-block shrink-0 ${className ?? ""}`}
+      style={{
+        width: size * 0.62,
+        height: size * 0.15,
+        borderRadius: Math.max(2, size * 0.04),
+        background: "linear-gradient(90deg, var(--brand-start), var(--brand-end))",
+      }}
+    />
   );
 }

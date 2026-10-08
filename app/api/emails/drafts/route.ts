@@ -1,6 +1,7 @@
 import { requireAuth } from "@/lib/auth/require-auth";
 import { prisma } from "@/lib/prisma";
 import { serializeEmail } from "@/lib/serialize";
+import { resolveMailbox } from "@/lib/mailbox";
 import { draftSchema } from "@/lib/validations/email";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -16,11 +17,13 @@ export async function POST(req: NextRequest) {
     }
 
     const { to, cc, bcc, subject, text, attachments } = parsed.data;
+    const mailbox = await resolveMailbox(user, parsed.data.mailboxId);
 
     const email = await prisma.email.create({
       data: {
         userId: user.id,
-        fromEmail: user.email,
+        mailboxId: mailbox.id,
+        fromEmail: mailbox.address,
         fromName: user.name,
         to: JSON.stringify(to),
         cc: JSON.stringify(cc),

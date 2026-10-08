@@ -2,6 +2,7 @@ import { z } from "zod";
 
 // Zod v4 uses z.email() and z.string().min etc - keep compatible
 export const sendEmailSchema = z.object({
+  mailboxId: z.string().optional(),
   to: z.union([z.email(), z.array(z.email()).min(1)]),
   cc: z.array(z.email()).optional(),
   bcc: z.array(z.email()).optional(),
@@ -20,6 +21,7 @@ export const sendEmailSchema = z.object({
 });
 
 export const draftSchema = z.object({
+  mailboxId: z.string().optional(),
   to: z.array(z.email()).optional().default([]),
   cc: z.array(z.email()).optional().default([]),
   bcc: z.array(z.email()).optional().default([]),

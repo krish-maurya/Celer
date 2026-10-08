@@ -1,6 +1,6 @@
 "use client";
 
-import { CelerMark } from "./CelerLogo";
+import { CelerBar } from "./CelerLogo";
 import {
   InboxPlusIcon,
   StarIcon,
@@ -59,11 +59,9 @@ export function Sidebar({
 
   return (
     <nav className="flex w-[64px] shrink-0 flex-col items-center border-r border-line bg-[#fbfbfa] py-4">
-      {/* Logo - consistent CelerMark as login page */}
-      <div className="mb-6 flex flex-col items-center">
-        <div className="mt-1.5">
-          <CelerMark size={18} />
-        </div>
+      {/* Logo: the gradient bar only */}
+      <div className="mb-6 flex h-9 items-center justify-center">
+        <CelerBar size={26} />
       </div>
 
       {/* Main nav */}
@@ -78,7 +76,7 @@ export function Sidebar({
               aria-label={label}
               aria-current={active ? "page" : undefined}
               onClick={() => onView(key)}
-              className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition-all ${
+              className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition-[background-color,color,box-shadow] duration-300 ${
                 active
                   ? "bg-[#18181b] text-white shadow-sm"
                   : "text-zinc-500 hover:bg-zinc-900/[0.06] hover:text-zinc-900"

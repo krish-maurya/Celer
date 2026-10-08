@@ -25,8 +25,25 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  emails   Email[]
-  sessions Session[]
+  emails    Email[]
+  sessions  Session[]
+  mailboxes Mailbox[]
+}
+
+// An email address the user can read/send from. Each user has one primary
+// mailbox (their login address) plus any extra addresses they add.
+model Mailbox {
+  id        String   @id @default(uuid())
+  address   String   @unique
+  name      String?
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emails Email[]
+
+  @@index([userId])
 }
 
 model Session {
@@ -79,7 +96,12 @@ model Email {
   userId String
   user   User @relation(fields: [userId],    references: [id],onDelete: Cascade  )
 
+  // Mailbox (address) this email belongs to
+  mailboxId String?
+  mailbox   Mailbox? @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+
   @@index([userId])
+  @@index([mailboxId])
   @@index([folder])
   @@index([receivedAt])
   @@index([fromEmail])

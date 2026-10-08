@@ -15,6 +15,18 @@ async function main() {
 
   console.log(`Seed user: ${email} / ${password}`);
 
+  // Mailboxes = the email addresses assigned to this account.
+  const primary = await prisma.mailbox.upsert({
+    where: { address: email },
+    update: { isPrimary: true, userId: user.id },
+    create: { address: email, name: "Demo User", isPrimary: true, userId: user.id },
+  });
+  const work = await prisma.mailbox.upsert({
+    where: { address: "work@celer.app" },
+    update: { userId: user.id },
+    create: { address: "work@celer.app", name: "Work", isPrimary: false, userId: user.id },
+  });
+
   // Clean prior seed mail for this user (keep it idempotent).
   await prisma.email.deleteMany({ where: { userId: user.id } });
 
@@ -76,6 +88,7 @@ async function main() {
     await prisma.email.create({
       data: {
         userId: user.id,
+        mailboxId: primary.id,
         fromEmail: r.fromEmail,
         fromName: r.fromName,
         to: JSON.stringify([email]),
@@ -84,7 +97,7 @@ async function main() {
         subject: r.subject,
         text: r.text,
         attachments: JSON.stringify(r.attachments),
-        folder: r.folder,
+        folder: r.folder as "INBOX",
         isRead: r.isRead,
         isStarred: r.isStarred,
         receivedAt: r.receivedAt,
@@ -96,6 +109,7 @@ async function main() {
   await prisma.email.create({
     data: {
       userId: user.id,
+      mailboxId: primary.id,
       fromEmail: email,
       fromName: "Demo User",
       to: JSON.stringify(["rico.oktananda1@gmail.com"]),
@@ -110,7 +124,65 @@ async function main() {
     },
   });
 
-  console.log(`Seeded ${rows.length + 1} emails.`);
+  // A second address with its own inbox, sent and draft mail.
+  const workRows = [
+    {
+      fromEmail: "hello@figma.com",
+      fromName: "Figma",
+      subject: "Your team's files were updated",
+      text: "Three files in your Work team changed this week. Open Figma to review the latest comments and version history.",
+      folder: "INBOX" as const,
+      isRead: false,
+      receivedAt: new Date("2026-06-29T12:00:00Z"),
+    },
+    {
+      fromEmail: "billing@notion.so",
+      fromName: "Notion",
+      subject: "Your invoice is ready",
+      text: "Your monthly invoice for the Work workspace is ready to download from the billing page.",
+      folder: "INBOX" as const,
+      isRead: true,
+      receivedAt: new Date("2026-06-27T08:20:00Z"),
+    },
+  ];
+  for (const r of workRows) {
+    await prisma.email.create({
+      data: {
+        userId: user.id,
+        mailboxId: work.id,
+        fromEmail: r.fromEmail,
+        fromName: r.fromName,
+        to: JSON.stringify([work.address]),
+        cc: "[]",
+        bcc: "[]",
+        subject: r.subject,
+        text: r.text,
+        attachments: "[]",
+        folder: r.folder,
+        isRead: r.isRead,
+        receivedAt: r.receivedAt,
+      },
+    });
+  }
+  await prisma.email.create({
+    data: {
+      userId: user.id,
+      mailboxId: work.id,
+      fromEmail: work.address,
+      fromName: "Work",
+      to: JSON.stringify(["hello@figma.com"]),
+      cc: "[]",
+      bcc: "[]",
+      subject: "Re: Your team's files were updated",
+      text: "Thanks — I'll review the comments on the onboarding flow today.",
+      attachments: "[]",
+      folder: "SENT",
+      isRead: true,
+      receivedAt: new Date("2026-06-29T14:00:00Z"),
+    },
+  });
+
+  console.log(`Seeded ${rows.length + 1 + workRows.length + 1} emails across 2 mailboxes.`);
 }
 
 main()

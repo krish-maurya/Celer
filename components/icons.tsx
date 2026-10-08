@@ -167,3 +167,30 @@ export const SearchIcon = (p: IconProps) => (
     <path d="m15.5 15.5 3.5 3.5" />
   </svg>
 );
+
+export const RestoreIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+    <path d="M3.5 4.5v4h4" />
+  </svg>
+);
+
+export const PencilIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M4 20h4L19 9l-4-4L4 16v4Z" />
+    <path d="m13.5 6.5 4 4" />
+  </svg>
+);
+
+export const PlusIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
+export const MailIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="m3.5 6.5 8.5 6.5 8.5-6.5" />
+  </svg>
+);

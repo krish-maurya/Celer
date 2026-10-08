@@ -68,3 +68,107 @@ input:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
 }
+
+/* ---------- Motion system ----------
+   One easing curve + one duration for every layout change so the list,
+   reading pane, tabs and menus all move together. */
+:root {
+  --ease-glide: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-glide: 480ms;
+}
+
+/* Mail list + reading pane. The list shrinks while the reader slides in from
+   the right; both use the same curve, so the reader's left edge always sits
+   exactly on the list's right edge. */
+.celer-list {
+  width: 100%;
+  transition: width var(--dur-glide) var(--ease-glide);
+}
+@media (min-width: 768px) {
+  .celer-list.is-open {
+    width: 380px;
+  }
+}
+
+.celer-reader {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 100%;
+  transform: translate3d(100%, 0, 0);
+  transition: transform var(--dur-glide) var(--ease-glide);
+}
+/* Open state uses no transform at all. A translate3d(0,0,0) here would keep the
+   reader on its own GPU layer, which rasterizes the email text blurry. */
+.celer-reader.is-open {
+  transform: none;
+}
+@media (min-width: 768px) {
+  .celer-reader {
+    width: calc(100% - 380px);
+  }
+}
+
+/* Content fade-in (list sections, email body, dialogs). */
+@keyframes celer-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.celer-enter {
+  animation: celer-enter 320ms var(--ease-glide) both;
+}
+
+@keyframes celer-pop {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.celer-pop {
+  animation: celer-pop 300ms var(--ease-glide) both;
+}
+
+/* Hover menus: always mounted, animated with opacity + transform. */
+.celer-menu {
+  transform-origin: top right;
+  transition:
+    opacity 180ms ease-out,
+    transform 260ms var(--ease-glide),
+    visibility 0s linear 260ms;
+  visibility: hidden;
+  opacity: 0;
+  transform: translate3d(0, -6px, 0) scale(0.97);
+}
+.celer-menu.is-open {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition-delay: 0s;
+}
+
+/* Sliding thumb for segmented controls. */
+.celer-thumb {
+  transition:
+    transform var(--dur-glide) var(--ease-glide),
+    width var(--dur-glide) var(--ease-glide);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}

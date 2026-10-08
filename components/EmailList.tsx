@@ -1,7 +1,8 @@
 "use client";
 
 import { Avatar, VerifiedBadge } from "./Avatar";
-import { FilterIcon, StarIcon, PaperclipIcon, SearchIcon } from "./icons";
+import { CelerBar } from "./CelerLogo";
+import { StarIcon, PaperclipIcon } from "./icons";
 import { formatDate, type Email } from "@/lib/types";
 
 export function EmailList({
@@ -12,8 +13,6 @@ export function EmailList({
   onSelect,
   onToggleStar,
   query,
-  onQuery,
-  title,
 }: {
   emails: Email[];
   selectedId: string | null;
@@ -22,31 +21,10 @@ export function EmailList({
   onSelect: (e: Email) => void;
   onToggleStar: (e: Email) => void;
   query: string;
-  onQuery: (q: string) => void;
-  title: string;
 }) {
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      {/* Search */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3">
-        <div className="flex h-8 flex-1 items-center gap-2 rounded-lg bg-zinc-50 px-2.5 ring-1 ring-zinc-900/[0.04] focus-within:bg-white focus-within:ring-zinc-900/10">
-          <SearchIcon size={16} className="shrink-0 text-zinc-400" />
-          <input
-            value={query}
-            onChange={(e) => onQuery(e.target.value)}
-            placeholder={`Search ${title.toLowerCase()}`}
-            className="w-full bg-transparent text-[13.5px] text-zinc-900 outline-none placeholder:text-zinc-400"
-          />
-        </div>
-        <button
-          className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-50 hover:text-zinc-700"
-          aria-label="Filter"
-        >
-          <FilterIcon size={16} />
-        </button>
-      </div>
-
-      <div className="celer-scroll flex-1 overflow-y-auto">
+      <div className="celer-scroll min-h-0 flex-1 overflow-y-auto">
         {loading && (
           <div className="space-y-3 p-3">
             {[1, 2, 3].map((i) => (
@@ -66,11 +44,11 @@ export function EmailList({
         {!loading && emails.length === 0 && (
           <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
             <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-zinc-50 ring-1 ring-zinc-900/5">
-              <span className="text-lg">✦</span>
+              <span className="text-lg"><CelerBar /></span>
             </div>
             <p className="max-w-[220px] text-[13.5px] font-medium leading-snug text-zinc-900">{emptyLabel}</p>
             <p className="mt-1 max-w-[240px] text-[12.5px] leading-snug text-zinc-500">
-              {query ? "Try a different search term." : "Compose your first email to get started."}
+              {query ? "Try a different search term." : "Nothing to show here yet."}
             </p>
           </div>
         )}

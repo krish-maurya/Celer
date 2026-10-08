@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { receivedEmail } from "@/lib/validations/email";
 import { getResend } from "@/lib/resend";
+import { ensurePrimaryMailbox } from "@/lib/mailbox";
 import { NextRequest, NextResponse } from "next/server";
 
 function parseSender(value: string) {
@@ -75,9 +76,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Received email has no recipient" }, { status: 400 });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email: recipient.trim().toLowerCase() },
+    const address = recipient.trim().toLowerCase();
+    const mailbox = await prisma.mailbox.findUnique({
+      where: { address },
+      include: { user: true },
     });
+    const user = mailbox?.user ?? (await prisma.user.findUnique({ where: { email: address } }));
 
     if (!user) {
       return NextResponse.json({ error: "No registered user found for this recipient" }, { status: 404 });
@@ -108,6 +112,7 @@ export async function POST(req: NextRequest) {
         html: email.html || "",
         receivedAt: new Date(event.created_at),
         userId: user.id,
+        mailboxId: mailbox?.id ?? (await ensurePrimaryMailbox(user)).id,
         folder: "INBOX",
       },
     });

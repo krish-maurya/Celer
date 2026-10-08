@@ -2,6 +2,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { prisma } from "@/lib/prisma";
 import { sendEmailSchema } from "@/lib/validations/email";
 import { serializeEmail } from "@/lib/serialize";
+import { resolveMailbox } from "@/lib/mailbox";
 import { getResend, getResendFrom, isResendConfigured } from "@/lib/resend";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -20,6 +21,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { to, cc, bcc, subject, text, html, attachments } = result.data;
+    const mailbox = await resolveMailbox(user, result.data.mailboxId);
 
     const resend = getResend();
     let resendId: string | null = null;
@@ -50,7 +52,8 @@ export async function POST(req: NextRequest) {
     const saved = await prisma.email.create({
       data: {
         userId: user.id,
-        fromEmail: user.email,
+        mailboxId: mailbox.id,
+        fromEmail: mailbox.address,
         fromName: user.name,
         to: JSON.stringify(Array.isArray(to) ? to : [to]),
         cc: JSON.stringify(cc || []),

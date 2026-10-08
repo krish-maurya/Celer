@@ -1,6 +1,7 @@
 import { hashPassword } from "@/lib/auth/password";
 import { createSession, SESSION_COOKIE } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
+import { ensurePrimaryMailbox } from "@/lib/mailbox";
 import { rateLimit } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -32,6 +33,8 @@ export async function POST(req: NextRequest) {
     const user = await prisma.user.create({
       data: { email, name: name || email.split("@")[0], passwordHash },
     });
+
+    await ensurePrimaryMailbox(user);
 
     const session = await createSession(user.id);
 

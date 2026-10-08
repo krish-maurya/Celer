@@ -24,7 +24,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ emai
 
     // If sending, validate as send
     if (shouldSend) {
-      const to = body.to || JSON.parse(existing.to || "[]");
+      const to = body.to || JSON.parse(String(existing.to || "[]"));
       const subject = body.subject ?? existing.subject;
       const text = body.text ?? existing.text;
 
